@@ -1,7 +1,6 @@
-// app/api/cron/scan/route.ts
 import { createClient } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
-import { dispararTelegram } from '@/utils/telegram';
+import { dispararTelegram } from '../../../utils/telegram';
 
 const supabase = createClient(
   process.env.SUPABASE_URL!,
@@ -22,8 +21,7 @@ export async function GET(request: Request) {
 
     // Loop interno para processar cada ativo ativado
     for (const ativo of ativos) {
-      // Nota: As funções de busca de mercado e Groq serão conectadas aqui.
-      // Para testes iniciais da infraestrutura, simulamos a detecção de um padrão.
+      // Simulação da detecção para testes iniciais
       const padraoDetectado = true;
 
       if (padraoDetectado) {
@@ -36,17 +34,17 @@ export async function GET(request: Request) {
           .order('created_at', { ascending: false })
           .limit(20);
 
-        // Dispara a chamada de ultra-velocidade para o Groq LLM (Simulação para teste estrutural)
+        // Dispara a chamada para simular a IA
         const sinalDaIA = {
           ticker: ativo.ticker,
           direcao: 'COMPRA',
-          horario_entrada: new Date(Date.now() + 5 * 60000).toISOString(), // T+5 minutos de antecedência
+          horario_entrada: new Date(Date.now() + 5 * 60000).toISOString(),
           tempo_expiracao: 5,
           assertividade_passada: 85.50
         };
 
         if (sinalDaIA) {
-          // Grava no banco de dados (o que aciona o Supabase Realtime na tela do celular)
+          // Grava no banco de dados (aciona o Supabase Realtime)
           const { data: novoSinal } = await supabase
             .from('historico_sinais')
             .insert([sinalDaIA])
