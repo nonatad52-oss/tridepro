@@ -1,7 +1,7 @@
 // app/api/cron/scan/route.ts
 import { createClient } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
-import { dispararTelegram } from '../../../../utils/telegram';
+import { dispararTelegram } from '@/utils/telegram';
 
 const supabase = createClient(
   process.env.SUPABASE_URL!,
