@@ -16,50 +16,30 @@ export default function Dashboard() {
   const [sinais, setSinais] = useState<Sinal[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // Função para buscar os sinais salvos pelo robô no Supabase
-  // Como o robô salva tudo na tabela 'historico_sinais', nós lemos direto de lá!
+  // Função real que busca os dados gravados no banco
   async function carregarSinais() {
     try {
-      // Usamos a própria API interna para buscar os dados de forma segura
-      const res = await fetch('/api/cron/scan'); 
-      // Nota: Como o scan roda o robô, vamos criar uma rota limpa de leitura depois.
-      // Para este painel inicial, vamos simular a recepção dos sinais em tempo real.
+      const res = await fetch('/api/sinais');
+      if (res.ok) {
+        const dados = await res.json();
+        setSinais(dados);
+      }
     } catch (error) {
-      console.error("Erro ao carregar sinais", error);
+      console.error("Erro ao carregar sinais reais:", error);
+    } finally {
+      setLoading(false);
     }
   }
 
-  // Efeito simulado para demonstração visual imediata do App enquanto o banco injeta
+  // Carrega ao abrir a página e atualiza automaticamente a cada 30 segundos
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setSinais([
-        {
-          id: 1,
-          ticker: 'EUR/USD',
-          direcao: 'COMPRA',
-          horario_entrada: new Date().toISOString(),
-          tempo_expiracao: 5,
-          assertividade_passada: 88.4,
-          resultado_real: 'PENDENTE'
-        },
-        {
-          id: 2,
-          ticker: 'BTC/USD',
-          direcao: 'VENDA',
-          horario_entrada: new Date().toISOString(),
-          tempo_expiracao: 5,
-          assertividade_passada: 91.2,
-          resultado_real: 'WIN'
-        }
-      ]);
-      setLoading(false);
-    }, 1000);
-    return () => clearTimeout(timer);
+    carregarSinais();
+    const intervalo = setInterval(carregarSinais, 30000); 
+    return () => clearInterval(intervalo);
   }, []);
 
   return (
     <div className="min-h-screen bg-slate-950 text-white font-sans">
-      {/* HEADER DO APP */}
       <header className="border-b border-slate-800 bg-slate-900/50 p-4 sticky top-0 backdrop-blur">
         <div className="max-w-4xl mx-auto flex justify-between items-center">
           <div className="flex items-center gap-2">
@@ -76,30 +56,30 @@ export default function Dashboard() {
         </div>
       </header>
 
-      {/* CONTEÚDO PRINCIPAL */}
       <main className="max-w-4xl mx-auto p-4 space-y-6">
-        
-        {/* CARD STATUS */}
         <div className="grid grid-cols-2 gap-4">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
             <p className="text-xs text-slate-400 uppercase font-semibold">Assertividade Média</p>
             <p className="text-2xl font-bold text-emerald-400 mt-1">89.8%</p>
           </div>
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
-            <p className="text-xs text-slate-400 uppercase font-semibold">Monitoramento</p>
-            <p className="text-2xl font-bold text-blue-400 mt-1">13 Ativos</p>
+            <p className="text-xs text-slate-400 uppercase font-semibold">Status do Sistema</p>
+            <p className="text-2xl font-bold text-blue-400 mt-1">Conectado</p>
           </div>
         </div>
 
-        {/* LISTA DE SINAIS EM TEMPO REAL */}
         <div className="space-y-4">
           <h2 className="text-lg font-semibold text-slate-200 flex items-center gap-2">
-            <span>📊</span> Últimos Sinais da IA (Groq)
+            <span>📊</span> Sinais em Tempo Real (Supabase + Groq)
           </h2>
 
           {loading ? (
             <div className="text-center py-12 text-slate-500 text-sm animate-pulse">
-              Carregando painel operacional...
+              Conectando ao banco de dados...
+            </div>
+          ) : sinais.length === 0 ? (
+            <div className="text-center py-12 text-slate-500 text-sm border border-dashed border-slate-800 rounded-2xl">
+              Nenhum sinal gerado ainda. Aguardando oportunidades do Groq...
             </div>
           ) : (
             <div className="grid gap-3">
