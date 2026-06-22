@@ -1,3 +1,5 @@
+export const dynamic = 'force-dynamic'; // <-- ESTA É A LINHA MÁGICA QUE BLOQUEIA O ERRO DA VERCEL
+
 import { createClient } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
 
@@ -30,7 +32,6 @@ async function dispararTelegram(sinal: any) {
 // 2. MOTOR DE ANÁLISE QUANTITATIVA
 export async function GET(request: Request) {
   try {
-    // A conexão com o Supabase agora fica AQUI DENTRO (Protegida do erro de Build da Vercel)
     const supabaseUrl = process.env.SUPABASE_URL;
     const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -50,8 +51,7 @@ export async function GET(request: Request) {
     }
 
     for (const ativo of ativos) {
-      // Simulação inicial de detecção da IA
-      const padraoDetectado = true; 
+      const padraoDetectado = true; // Simulação inicial
 
       if (padraoDetectado) {
         const sinalDaIA = {
