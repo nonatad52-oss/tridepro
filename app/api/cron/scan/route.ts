@@ -1,7 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
 
-// 1. FUNÇÃO DO TELEGRAM (Integrada para evitar erros de pasta na Vercel)
+// 1. FUNÇÃO DO TELEGRAM
 async function dispararTelegram(sinal: any) {
   const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
   const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
@@ -27,15 +27,19 @@ async function dispararTelegram(sinal: any) {
   });
 }
 
-// 2. CONEXÃO COM O BANCO DE DADOS
-const supabase = createClient(
-  process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
-
-// 3. MOTOR DE ANÁLISE QUANTITATIVA
+// 2. MOTOR DE ANÁLISE QUANTITATIVA
 export async function GET(request: Request) {
   try {
+    // A conexão com o Supabase agora fica AQUI DENTRO (Protegida do erro de Build da Vercel)
+    const supabaseUrl = process.env.SUPABASE_URL;
+    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    if (!supabaseUrl || !supabaseKey) {
+      return NextResponse.json({ error: "Credenciais do Supabase ausentes." }, { status: 500 });
+    }
+
+    const supabase = createClient(supabaseUrl, supabaseKey);
+
     const { data: ativos, error } = await supabase
       .from('ativos_monitorados')
       .select('ticker, categoria')
