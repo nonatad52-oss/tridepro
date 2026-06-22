@@ -44,8 +44,7 @@ async function dispararTelegram(sinal: any) {
 // 2. MOTOR DE ANÁLISE QUANTITATIVA (GROQ IA)
 async function analisarComGroq(ticker: string, apiKey: string) {
   try {
-    // Prompt focado em price action institucional básico para gerar um sinal
-    const prompt = `Atuando como um trader institucional quantitativo, analise o ativo ${ticker}. Responda estritamente com um JSON válido neste formato exato, sem textos adicionais: {"sinal": "COMPRA" ou "VENDA" ou "AGUARDAR", "assertividade": número de 0 a 100}. Seja rigoroso, só gere COMPRA ou VENDA se houver alta probabilidade.`;
+    const prompt = `Atuando como um trader institucional, analise o ativo ${ticker}. Responda estritamente com um JSON válido (sem textos adicionais): {"sinal": "COMPRA", "assertividade": 90} ou {"sinal": "VENDA", "assertividade": 90} ou {"sinal": "AGUARDAR", "assertividade": 0}.`;
     
     const resposta = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
@@ -56,15 +55,15 @@ async function analisarComGroq(ticker: string, apiKey: string) {
       body: JSON.stringify({
         model: 'llama3-70b-8192',
         messages: [{ role: 'user', content: prompt }],
-        temperature: 0.2
+        temperature: 0.1
       })
     });
     
     const dados = await resposta.json();
     const texto = dados.choices[0].message.content;
     
-    // Extrai o JSON da resposta da IA
-    const match = texto.match(/\{.*\}/s);
+    // Extrai o JSON usando regex compatível com todas as versões
+    const match = texto.match(/\{[\s\S]*\}/);
     if (match) return JSON.parse(match[0]);
     
     return { sinal: 'AGUARDAR', assertividade: 0 };
@@ -73,7 +72,7 @@ async function analisarComGroq(ticker: string, apiKey: string) {
   }
 }
 
-// 3. ROTA PRINCIPAL DO SISTEMA
+// 3. ROTA PRINCIPAL
 export async function GET() {
   try {
     const supabaseUrl = process.env.SUPABASE_URL;
@@ -81,7 +80,7 @@ export async function GET() {
     const groqKey = process.env.GROQ_API_KEY;
 
     if (!supabaseUrl || !supabaseKey || !groqKey) {
-      return NextResponse.json({ error: "Credenciais de API ausentes na Vercel." }, { status: 500 });
+      return NextResponse.json({ error: "Credenciais ausentes." }, { status: 500 });
     }
 
     const supabase = createClient(supabaseUrl, supabaseKey);
@@ -99,16 +98,12 @@ export async function GET() {
     let sinaisGerados = 0;
 
     for (const ativo of ativos) {
-      // O Groq avalia o mercado real
       const analiseIA = await analisarComGroq(ativo.ticker, groqKey);
       
       if (analiseIA && (analiseIA.sinal === 'COMPRA' || analiseIA.sinal === 'VENDA')) {
         
         const agora = new Date();
-        const minutosAtuais = agora.getMinutes();
-        const resto = minutosAtuais % 5;
-        const minutosParaProximaVela = 5 - resto;
-        
+        const minutosParaProximaVela = 5 - (agora.getMinutes() % 5);
         const horarioEntrada = new Date(agora.getTime() + minutosParaProximaVela * 60000);
         horarioEntrada.setSeconds(0, 0); 
 
@@ -134,12 +129,7 @@ export async function GET() {
       }
     }
 
-    return NextResponse.json({ 
-      success: true, 
-      sinais_gerados: sinaisGerados, 
-      aviso: "Ciclo de IA finalizado",
-      timestamp: new Date().toISOString() 
-    });
+    return NextResponse.json({ success: true, sinais_gerados: sinaisGerados });
 
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 });
