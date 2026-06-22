@@ -1,15 +1,41 @@
 import { createClient } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
-import { dispararTelegram } from '../../../utils/telegram';
 
+// 1. FUNÇÃO DO TELEGRAM (Integrada para evitar erros de pasta na Vercel)
+async function dispararTelegram(sinal: any) {
+  const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+  const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+  
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+
+  const data = new Date(sinal.horario_entrada);
+  const horaFormatada = data.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+  const textoMensagem = `🚨 *ENTRADA ${sinal.direcao}*\n\n` +
+    `🎯 *Ativo:* ${sinal.ticker}\n` +
+    `⏳ *Entrada:* ${horaFormatada}\n` +
+    `⏱ *Expiração:* ${sinal.tempo_expiracao} Minutos`;
+
+  await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: TELEGRAM_CHAT_ID,
+      text: textoMensagem,
+      parse_mode: 'Markdown'
+    })
+  });
+}
+
+// 2. CONEXÃO COM O BANCO DE DADOS
 const supabase = createClient(
   process.env.SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
+// 3. MOTOR DE ANÁLISE QUANTITATIVA
 export async function GET(request: Request) {
   try {
-    // 1. Busca no Supabase quais ativos estão ativados para análise
     const { data: ativos, error } = await supabase
       .from('ativos_monitorados')
       .select('ticker, categoria')
@@ -19,22 +45,11 @@ export async function GET(request: Request) {
       return NextResponse.json({ message: 'Nenhum ativo selecionado para monitoramento.' });
     }
 
-    // Loop interno para processar cada ativo ativado
     for (const ativo of ativos) {
-      // Simulação da detecção para testes iniciais
-      const padraoDetectado = true;
+      // Simulação inicial de detecção da IA
+      const padraoDetectado = true; 
 
       if (padraoDetectado) {
-        // Puxa o histórico de feedbacks do usuário armazenado no Supabase para injetar na IA
-        const { data: historicoTrader } = await supabase
-          .from('historico_sinais')
-          .select('direcao, resultado_real')
-          .eq('ticker', ativo.ticker)
-          .not('resultado_real', 'eq', 'PENDENTE')
-          .order('created_at', { ascending: false })
-          .limit(20);
-
-        // Dispara a chamada para simular a IA
         const sinalDaIA = {
           ticker: ativo.ticker,
           direcao: 'COMPRA',
@@ -43,18 +58,14 @@ export async function GET(request: Request) {
           assertividade_passada: 85.50
         };
 
-        if (sinalDaIA) {
-          // Grava no banco de dados (aciona o Supabase Realtime)
-          const { data: novoSinal } = await supabase
-            .from('historico_sinais')
-            .insert([sinalDaIA])
-            .select()
-            .single();
+        const { data: novoSinal } = await supabase
+          .from('historico_sinais')
+          .insert([sinalDaIA])
+          .select()
+          .single();
 
-          // Dispara para o canal do Telegram do usuário
-          if (novoSinal) {
-            await dispararTelegram(novoSinal);
-          }
+        if (novoSinal) {
+          await dispararTelegram(novoSinal);
         }
       }
     }
