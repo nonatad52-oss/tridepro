@@ -7,6 +7,7 @@ import yahooFinance from 'yahoo-finance2';
 // 1. Coleta de dados macro e indicadores técnicos estruturais
 async function getMarketData(ticker: string) {
   try {
+    // @ts-ignore - Diz ao TypeScript para ignorar os avisos de tipo desta linha
     const quote = await yahooFinance.quote(ticker);
     return {
       preco: quote.regularMarketPrice,
@@ -71,11 +72,9 @@ export async function GET(request: Request) {
   const context = { session: hour < 8 ? "ASIATICA" : hour < 13 ? "EUROPEIA" : "AMERICANA" };
 
   for (const ativo of ativos || []) {
-    // A) Puxar Dados do Yahoo Finance
     const mkt = await getMarketData(ativo.ticker);
     if (!mkt) continue;
 
-    // B) Filtro de Memória: Busca o último sinal no Supabase para aprender com ele
     const { data: historico } = await supabase
       .from('historico_sinais')
       .select('direcao')
@@ -85,19 +84,11 @@ export async function GET(request: Request) {
     
     const ultimoSinal = historico && historico.length > 0 ? historico[0].direcao : "NENHUM";
 
-    // C) Processamento da Análise com Inteligência de Padrões
     const analysis = await getGeniusSignal(ativo.ticker, mkt, context, ultimoSinal);
 
-    // D) Filtros de Segurança do Gênio
-    if (analysis.sinal === "AGUARDAR" || analysis.confianca < 89) {
-      continue; // Ignora o sinal se não houver certeza absoluta
-    }
+    if (analysis.sinal === "AGUARDAR" || analysis.confianca < 89) continue;
+    if (analysis.sinal === ultimoSinal) continue;
 
-    if (analysis.sinal === ultimoSinal) {
-      continue; // Evita bombardeio/spam de sinais idênticos em sequência
-    }
-
-    // E) Salvar no Banco e Notificar no Telegram
     await supabase.from('historico_sinais').insert([{
       ticker: ativo.ticker,
       direcao: analysis.sinal,
