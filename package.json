@@ -14,5 +14,10 @@
     "react-dom": "^18.2.0",
     "@supabase/supabase-js": "^2.45.0",
     "yahoo-finance2": "^2.13.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.2.0"
   }
 }
