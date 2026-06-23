@@ -1,8 +1,10 @@
 export const dynamic = 'force-dynamic';
+
 import { createClient } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
 import yahooFinance from 'yahoo-finance2';
 
+// 1. Função para buscar dados de mercado em tempo real
 async function getMarketData(ticker: string) {
   try {
     const quote = await yahooFinance.quote(ticker);
@@ -14,9 +16,9 @@ async function getMarketData(ticker: string) {
   } catch (e) { return null; }
 }
 
+// 2. Lógica de Inteligência do Mago (Groq)
 async function getExpertSignal(ticker: string, mkt: any, context: any) {
-  // Lógica de "Mean Reversion" integrada no prompt
-  const isOverextended = Math.abs(mkt.variacao) > 3.0; // Se subiu ou caiu mais de 3%
+  const isOverextended = Math.abs(mkt.variacao) > 3.0;
   
   const prompt = `
     Analise o ativo ${ticker}. 
@@ -24,10 +26,9 @@ async function getExpertSignal(ticker: string, mkt: any, context: any) {
     Contexto: ${context.session}.
     
     ESTRATÉGIA: ${isOverextended ? "REVERSÃO À MÉDIA (O mercado esticou demais)" : "SEGUIR TENDÊNCIA"}
-    
     ${isOverextended ? "Como o ativo esticou mais de 3%, procure sinais de exaustão para operar contra a tendência." : "Busque continuidade com base no fluxo de volume."}
     
-    Retorne APENAS JSON: {"sinal": "COMPRA"|"VENDA", "confianca": number, "stop_loss": number, "take_profit": number, "motivo": string}
+    Retorne APENAS JSON estrito: {"sinal": "COMPRA"|"VENDA", "confianca": number, "stop_loss": number, "take_profit": number, "motivo": string}
   `;
 
   const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -40,14 +41,16 @@ async function getExpertSignal(ticker: string, mkt: any, context: any) {
   return JSON.parse(data.choices[0].message.content);
 }
 
+// 3. Rota Principal
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   if (searchParams.get('key') !== process.env.CRON_SECRET) return new NextResponse('Unauthorized', { status: 401 });
 
   const supabase = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
+  
+  // Busca apenas ativos ativos
   const { data: ativos } = await supabase.from('ativos_monitorados').select('*').eq('status_ativo', true);
   
-  // Contexto dinâmico de sessão
   const hour = new Date().getUTCHours();
   const context = { session: hour < 8 ? "ASIATICA" : hour < 13 ? "EUROPEIA" : "AMERICANA" };
 
@@ -66,6 +69,7 @@ export async function GET(request: Request) {
         take_profit: analysis.take_profit
       }]);
       
+      // Envio para Telegram
       await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
