@@ -12,6 +12,8 @@ async function getAdvancedMarketData(ticker: string) {
     
     // Busca os últimos 30 dias para entender a tendência macro
     const trintaDiasAtras = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    
+    // @ts-ignore
     const historical = await yahooFinance.historical(ticker, { period1: trintaDiasAtras });
 
     const ultimosFechamentos = historical
@@ -68,7 +70,7 @@ async function getSurgicalSignal(ticker: string, mkt: any) {
         model: "llama3-70b-8192", 
         messages: [{ role: "user", content: prompt }], 
         response_format: { type: "json_object" },
-        temperature: 0.15 // Máxima precisão matemática, sem espaço para invenções
+        temperature: 0.15
       })
     });
     
@@ -99,14 +101,11 @@ export async function GET(request: Request) {
 
     const analysis = await getSurgicalSignal(ativo.ticker, mkt);
 
-    // Se o sinal for de aguardar ou a confiança for menor que 85%, ignora o disparo
     if (analysis.sinal === "AGUARDAR" || analysis.confianca < 85) continue;
 
-    // Configura os emojis e termos baseado na direção
     const isCompra = analysis.sinal === 'COMPRA';
     const tagAcao = isCompra ? '🟢 CALL (COMPRA)' : '🔴 PUT (VENDA)';
 
-    // Layout Unificado: Cripto + Opções Binárias
     await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
