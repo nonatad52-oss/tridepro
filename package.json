@@ -16,5 +16,6 @@
     "typescript": "latest",
     "@types/react": "latest",
     "@types/node": "latest"
+    "yahoo-finance2": "^2.13.0"
   }
 }
