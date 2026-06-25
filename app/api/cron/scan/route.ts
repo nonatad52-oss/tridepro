@@ -1,10 +1,10 @@
 export const dynamic = 'force-dynamic';
+export const maxDuration = 60; // 🔥 ISSO AQUI RESOLVE O PROBLEMA DO TEMPO! Dá 60 segundos pra Vercel.
 
 import { createClient } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
 import yahooFinance from 'yahoo-finance2';
 
-// 1. Coleta Dinâmica de Dados
 async function getAdvancedMarketData(ticker: string) {
   try {
     // @ts-ignore
@@ -23,7 +23,6 @@ async function getAdvancedMarketData(ticker: string) {
       maximaDia: quote.regularMarketDayHigh || 0,
       minimaDia: quote.regularMarketDayLow || 0,
       volumeHoje: quote.regularMarketVolume || 0,
-      volumeMedio3M: quote.averageDailyVolume3Month || 0,
       historico10Dias: ultimosFechamentos.join(', ')
     };
   } catch (e) { 
@@ -31,7 +30,6 @@ async function getAdvancedMarketData(ticker: string) {
   }
 }
 
-// 2. Cérebro Preditivo (Foco em Antecedência de 5 Minutos)
 async function getSurgicalSignal(ticker: string, mkt: any) {
   try {
     const prompt = `
@@ -40,17 +38,17 @@ async function getSurgicalSignal(ticker: string, mkt: any) {
       
       MÉTRICAS ATUAIS:
       - Preço Atual: ${mkt.precoAtual} (Variação: ${mkt.variacaoDia}%)
-      - Extremos do Dia: Mínima=${mkt.minimaDia} | Máxima=${mkt.maximaDia}
-      - Histórico (Últimos 10 períodos): [${mkt.historico10Dias}]
+      - Extremos: Mín=${mkt.minimaDia} | Máx=${mkt.maximaDia}
+      - Histórico 10 períodos: [${mkt.historico10Dias}]
 
-      REGRAS PREDITIVAS (AVISO PRÉVIO):
-      1. NÃO dê um sinal para entrar agora. Projete onde o preço estará em 5 minutos.
-      2. Se o preço está indo em direção a uma resistência forte, o sinal é para um PUT (Venda) daqui a 5 minutos.
-      3. Se o preço está caindo em direção a um suporte forte, o sinal é para um CALL (Compra) daqui a 5 minutos.
-      4. Indique o "preco_alvo_entrada" (o preço exato onde o trader deve dar o clique daqui a 5 minutos).
+      REGRAS PREDITIVAS:
+      1. NÃO dê sinal para entrar agora. Projete onde o preço estará em 5 minutos.
+      2. Perto da resistência máxima = PUT (Venda) daqui a 5 min.
+      3. Perto do suporte mínimo = CALL (Compra) daqui a 5 min.
+      4. Indique o preco_alvo_entrada.
 
       Retorne APENAS um JSON válido:
-      {"sinal": "COMPRA"|"VENDA"|"AGUARDAR", "confianca": number, "preco_alvo_entrada": number, "expiracao_ob": "1 Minuto"|"5 Minutos", "gatilho_tecnico": "Explique brevemente a previsão para os próximos 5 minutos"}
+      {"sinal": "COMPRA"|"VENDA"|"AGUARDAR", "confianca": number, "preco_alvo_entrada": number, "expiracao_ob": "1 Minuto"|"5 Minutos", "gatilho_tecnico": "Motivo rápido"}
     `;
 
     const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -67,11 +65,10 @@ async function getSurgicalSignal(ticker: string, mkt: any) {
     const data = await response.json();
     return JSON.parse(data.choices[0].message.content);
   } catch (error) {
-    return { sinal: "AGUARDAR", confianca: 0, preco_alvo_entrada: 0, expiracao_ob: "5 Minutos", gatilho_tecnico: "Erro" };
+    return { sinal: "AGUARDAR", confianca: 0 };
   }
 }
 
-// 3. Rota Principal
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   if (searchParams.get('key') !== process.env.CRON_SECRET) {
@@ -81,21 +78,26 @@ export async function GET(request: Request) {
   const supabase = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
   const { data: ativos } = await supabase.from('ativos_monitorados').select('*').eq('status_ativo', true);
 
-  if (!ativos || ativos.length === 0) {
-    return NextResponse.json({ success: true, message: "Sem ativos." });
-  }
+  if (!ativos || ativos.length === 0) return NextResponse.json({ success: true, message: "Sem ativos." });
 
-  // --- LÓGICA DO RELÓGIO (HORÁRIO DE ENTRADA + 5 MINUTOS) ---
+  // 🔥 MENSAGEM DE AVISO: Dispara no Telegram ASSIM QUE COMEÇA!
+  await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: process.env.TELEGRAM_CHAT_ID,
+      text: `⏳ *Gênio Trabalhando...*\nAnalisando ${ativos.length} ativos neste momento. Aguarde o resultado...`,
+      parse_mode: 'Markdown'
+    })
+  });
+
   const dataAtual = new Date();
   dataAtual.setMinutes(dataAtual.getMinutes() + 5);
-  // Converte para o horário de Brasília para a mensagem do Telegram
   const horarioEntrada = dataAtual.toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' });
 
   let sinaisEnviados = 0;
-  let ativosAnalisados = [];
   
   for (const ativo of ativos) {
-    ativosAnalisados.push(ativo.ticker);
     const mkt = await getAdvancedMarketData(ativo.ticker);
     if (!mkt) continue;
 
@@ -118,12 +120,13 @@ export async function GET(request: Request) {
     });
   }
 
+  // MENSAGEM FINAL APÓS TERMINAR
   await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       chat_id: process.env.TELEGRAM_CHAT_ID,
-      text: `ℹ️ *Relatório do Gênio:*\nVarredura Concluída.\n\n📋 *Ativos:* ${ativosAnalisados.join(', ')}\n🎯 *Sinais:* ${sinaisEnviados}`,
+      text: `✅ *Varredura Concluída!*\nForam encontrados ${sinaisEnviados} sinais para operar agora.`,
       parse_mode: 'Markdown'
     })
   });
