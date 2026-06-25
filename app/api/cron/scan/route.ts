@@ -1,54 +1,62 @@
 export const dynamic = 'force-dynamic';
-export const maxDuration = 60; // Garante tempo suficiente para processar todos os mais de 20 ativos
+export const maxDuration = 60;
 
 import { createClient } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
 import yahooFinance from 'yahoo-finance2';
 
+function calcularRSI(precos: number[], periodos = 14) {
+  if (precos.length < periodos + 1) return 50;
+  let ganhos = 0; let perdas = 0;
+  for (let i = precos.length - periodos; i < precos.length; i++) {
+    const diferenca = precos[i] - precos[i - 1];
+    if (diferenca >= 0) ganhos += diferenca;
+    else perdas -= diferenca;
+  }
+  const ganhoMedio = ganhos / periodos;
+  const perdaMedia = perdas / periodos;
+  if (perdaMedia === 0) return 100;
+  const rs = ganhoMedio / perdaMedia;
+  return 100 - (100 / (1 + rs));
+}
+
+function calcularBollinger(precos: number[], periodos = 20) {
+  if (precos.length < periodos) return { superior: 0, inferior: 0, media: 0 };
+  const corte = precos.slice(-periodos);
+  const sma = corte.reduce((a, b) => a + b, 0) / periodos;
+  const variancia = corte.reduce((a, b) => a + Math.pow(b - sma, 2), 0) / periodos;
+  const desvioPadrao = Math.sqrt(variancia);
+  return { superior: sma + (desvioPadrao * 2), inferior: sma - (desvioPadrao * 2) };
+}
+
 async function getAdvancedMarketData(ticker: string) {
   try {
     // @ts-ignore
     const quote = await yahooFinance.quote(ticker);
-    const dezDiasAtras = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000);
+    const quarentaDiasAtras = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000);
     // @ts-ignore
-    const historical = await yahooFinance.historical(ticker, { period1: dezDiasAtras });
+    const historical = await yahooFinance.historical(ticker, { period1: quarentaDiasAtras });
 
-    const ultimosFechamentos = historical
-      .slice(-10)
-      .map(dia => Number(dia.close).toFixed(ticker.includes('-USD') ? 4 : 2));
+    const todosFechamentos = historical.map(dia => Number(dia.close));
+    const rsi = calcularRSI(todosFechamentos, 14);
+    const bb = calcularBollinger(todosFechamentos, 20);
 
     return {
       precoAtual: quote.regularMarketPrice || 0,
-      variacaoDia: quote.regularMarketChangePercent || 0,
-      maximaDia: quote.regularMarketDayHigh || 0,
-      minimaDia: quote.regularMarketDayLow || 0,
-      volumeHoje: quote.regularMarketVolume || 0,
-      historico10Dias: ultimosFechamentos.join(', ')
+      rsi: rsi.toFixed(2),
+      bbSuperior: bb.superior.toFixed(4),
+      bbInferior: bb.inferior.toFixed(4)
     };
-  } catch (e) { 
-    return null; 
-  }
+  } catch (e) { return null; }
 }
 
 async function getSurgicalSignal(ticker: string, mkt: any) {
   try {
     const prompt = `
-      Você é um Trader Preditivo de Elite especialista em Opções Binárias e Scalping.
-      Analise o ativo ${ticker} e identifique uma oportunidade matemática clara para DAQUI A 5 MINUTOS.
-      
-      MÉTRICAS ATUAIS:
-      - Preço Atual: ${mkt.precoAtual} (Variação: ${mkt.variacaoDia}%)
-      - Extremos do Dia: Mínima=${mkt.minimaDia} | Máxima=${mkt.maximaDia}
-      - Histórico Recente: [${mkt.historico10Dias}]
-
-      REGRAS PREDITIVAS DE ANTECE DÊNCIA (5 MINUTOS):
-      1. Projete a movimentação para os próximos 5 minutos com base na proximidade dos extremos (suporte/resistência).
-      2. Se o preço estiver muito perto da Máxima do dia perdendo força, sinalize PUT (Venda) para daqui a 5 minutos.
-      3. Se o preço estiver muito perto da Mínima do dia demonstrando suporte, sinalize CALL (Compra) para daqui a 5 minutos.
-      4. Estipule a taxa ideal no campo "preco_alvo_entrada".
-
-      Retorne APENAS um JSON válido:
-      {"sinal": "COMPRA"|"VENDA"|"AGUARDAR", "confianca": number, "preco_alvo_entrada": number, "expiracao_ob": "1 Minuto"|"5 Minutos", "gatilho_tecnico": "Breve justificativa técnica do padrão"}
+      Analise ${ticker} (RSI: ${mkt.rsi}, Bollinger Superior: ${mkt.bbSuperior}, Bollinger Inferior: ${mkt.bbInferior}, Preço Atual: ${mkt.precoAtual}).
+      Gere uma operação de alta probabilidade para daqui a 5 minutos baseada em exaustão de preço.
+      Retorne APENAS um objeto JSON válido:
+      {"sinal": "COMPRA"|"VENDA"|"AGUARDAR", "confianca": number, "preco_alvo_entrada": number, "expiracao_ob": "1 Minuto"|"5 Minutos"}
     `;
 
     const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -58,15 +66,13 @@ async function getSurgicalSignal(ticker: string, mkt: any) {
         model: "llama3-70b-8192", 
         messages: [{ role: "user", content: prompt }], 
         response_format: { type: "json_object" },
-        temperature: 0.35
+        temperature: 0.2
       })
     });
     
     const data = await response.json();
     return JSON.parse(data.choices[0].message.content);
-  } catch (error) {
-    return { sinal: "AGUARDAR", confianca: 0 };
-  }
+  } catch (error) { return { sinal: "AGUARDAR", confianca: 0 }; }
 }
 
 export async function GET(request: Request) {
@@ -76,60 +82,33 @@ export async function GET(request: Request) {
   }
 
   const supabase = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
-  // 🔥 CONSULTA APONTANDO PARA A NOVA TABELA
   const { data: ativos } = await supabase.from('ativos_global').select('*').eq('status_ativo', true);
 
-  if (!ativos || ativos.length === 0) return NextResponse.json({ success: true, message: "Nenhum ativo encontrado na tabela ativos_global." });
-
-  // Alerta inicial de varredura
-  await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: process.env.TELEGRAM_CHAT_ID,
-      text: `⏳ *Gênio Iniciando Varredura Global...*\nMapeando o comportamento preditivo de *${ativos.length} ativos* simultaneamente. Aguarde os sinais em instantes...`,
-      parse_mode: 'Markdown'
-    })
-  });
+  if (!ativos || ativos.length === 0) return NextResponse.json({ success: true });
 
   const dataAtual = new Date();
   dataAtual.setMinutes(dataAtual.getMinutes() + 5);
   const horarioEntrada = dataAtual.toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' });
 
-  let sinaisEnviados = 0;
-  
   for (const ativo of ativos) {
     const mkt = await getAdvancedMarketData(ativo.ticker);
     if (!mkt) continue;
 
     const analysis = await getSurgicalSignal(ativo.ticker, mkt);
-
     if (analysis.sinal === "AGUARDAR" || analysis.confianca < 75) continue;
 
-    sinaisEnviados++;
-    const isCompra = analysis.sinal === 'COMPRA';
-    const tagAcao = isCompra ? '🟢 CALL (COMPRA)' : '🔴 PUT (VENDA)';
+    const tagAcao = analysis.sinal === 'COMPRA' ? '🟢 CALL (COMPRA)' : '🔴 PUT (VENDA)';
 
     await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         chat_id: process.env.TELEGRAM_CHAT_ID,
-        text: `🧠 *SINAL PREDITIVO GÊNIO PRO*\n\n⏰ *ENTRADA ANTECIPADA ÀS:* ${horarioEntrada}\n_(Abra a corretora e prepare-se)_\n\n📈 *Ativo:* #${ativo.ticker.replace('-','_').replace('=','_')}\n🎯 *Operação:* ${tagAcao}\n🔥 *Confiança:* ${analysis.confianca}%\n\n⏱️ *OPÇÕES BINÁRIAS:*\n⏳ *Expiração:* ${analysis.expiracao_ob}\n🎯 *Taxa Alvo de Entrada:* $${analysis.preco_alvo_entrada || mkt.precoAtual}\n\n⚡ *Análise Gráfica:* ${analysis.gatilho_tecnico}`,
+        text: `🎯 *SINAL EMITIDO*\n\n📈 *Ativo:* #${ativo.ticker.replace('-','_').replace('=','_')}\n🎯 *Operação:* ${tagAcao}\n⏰ *Entrada:* ${horarioEntrada}\n⏳ *Expiração:* ${analysis.expiracao_ob}\n🎯 *Taxa:* $${analysis.preco_alvo_entrada || mkt.precoAtual}\n🔥 *Confiança:* ${analysis.confianca}%`,
         parse_mode: 'Markdown'
       })
     });
   }
-
-  await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: process.env.TELEGRAM_CHAT_ID,
-      text: `✅ *Varredura Completa!*\nTodos os ${ativos.length} ativos foram checados. Foram emitidos ${sinaisEnviados} alertas de entrada antecipada.`,
-      parse_mode: 'Markdown'
-    })
-  });
 
   return NextResponse.json({ success: true });
 }
