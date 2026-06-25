@@ -4,17 +4,17 @@ import { createClient } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
 import yahooFinance from 'yahoo-finance2';
 
-// 1. Coleta Avançada de Dados
+// 1. Coleta Dinâmica de Dados
 async function getAdvancedMarketData(ticker: string) {
   try {
     // @ts-ignore
     const quote = await yahooFinance.quote(ticker);
-    const trintaDiasAtras = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const dezDiasAtras = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000);
     // @ts-ignore
-    const historical = await yahooFinance.historical(ticker, { period1: trintaDiasAtras });
+    const historical = await yahooFinance.historical(ticker, { period1: dezDiasAtras });
 
     const ultimosFechamentos = historical
-      .slice(-15)
+      .slice(-10)
       .map(dia => Number(dia.close).toFixed(ticker.includes('-USD') ? 4 : 2));
 
     return {
@@ -24,28 +24,34 @@ async function getAdvancedMarketData(ticker: string) {
       minimaDia: quote.regularMarketDayLow || 0,
       volumeHoje: quote.regularMarketVolume || 0,
       volumeMedio3M: quote.averageDailyVolume3Month || 0,
-      media50: quote.fiftyDayAverage || 0,
-      media200: quote.twoHundredDayAverage || 0,
-      historico15Dias: ultimosFechamentos.join(', ')
+      historico10Dias: ultimosFechamentos.join(', ')
     };
   } catch (e) { 
     return null; 
   }
 }
 
-// 2. Cérebro de Análise
+// 2. Cérebro Focado em Day Trade e Opções Binárias
 async function getSurgicalSignal(ticker: string, mkt: any) {
   try {
     const prompt = `
-      Você é um algoritmo de Alta Frequência (HFT) e especialista em Price Action e Fluxo de Ordens.
-      Analise o ativo ${ticker}:
-      - Preço Atual: ${mkt.precoAtual} (Variação: ${mkt.variacaoDia}%)
-      - Médias Móveis: SMA50=${mkt.media50} | SMA200=${mkt.media200}
-      - Volume: Hoje=${mkt.volumeHoje} | Média 3M=${mkt.volumeMedio3M}
-      - Histórico 15 dias: [${mkt.historico15Dias}]
+      Você é um Trader de Elite especialista em Scalping e Opções Binárias (Price Action micro).
+      Analise o ativo ${ticker} para identificar entradas imediatas de CALL/PUT ou Compra/Venda rápida:
+      
+      MÉTRICAS ATUAIS:
+      - Preço Atual: ${mkt.precoAtual} (Variação do Dia: ${mkt.variacaoDia}%)
+      - Extremos do Dia: Mínima=${mkt.minimaDia} | Máxima=${mkt.maximaDia}
+      - Histórico Recente (Últimos 10 períodos): [${mkt.historico10Dias}]
 
-      Retorne APENAS um objeto JSON válido:
-      {"sinal": "COMPRA"|"VENDA"|"AGUARDAR", "confianca": number, "stop_loss": number, "take_profit": number, "expiracao_ob": "1 Minuto"|"5 Minutos"|"15 Minutos", "gatilho_tecnico": "breve explicacao"}
+      ESTRATÉGIA DE ALTA FREQUÊNCIA:
+      1. Avalie a posição do Preço Atual em relação à Máxima e Mínima do dia para achar suporte/resistência.
+      2. Se o preço atual estiver muito perto da Mínima do dia e o histórico recente mostrar reação, é forte candidato a CALL (Compra).
+      3. Se o preço atual estiver muito perto da Máxima do dia com perda de força, é forte candidato a PUT (Venda).
+      4. Defina tempos rápidos de expiração para Opções Binárias (1 Minuto ou 5 Minutos).
+      5. Só retorne "AGUARDAR" se o preço estiver exatamente travado no mesmo valor do histórico.
+
+      Retorne APENAS um JSON válido:
+      {"sinal": "COMPRA"|"VENDA"|"AGUARDAR", "confianca": number, "stop_loss": number, "take_profit": number, "expiracao_ob": "1 Minuto"|"5 Minutos"|"15 Minutos", "gatilho_tecnico": "motivo rápido do price action"}
     `;
 
     const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -55,7 +61,7 @@ async function getSurgicalSignal(ticker: string, mkt: any) {
         model: "llama3-70b-8192", 
         messages: [{ role: "user", content: prompt }], 
         response_format: { type: "json_object" },
-        temperature: 0.15
+        temperature: 0.35 // Mais flexível para caçar padrões de velas rápidos
       })
     });
     
@@ -77,10 +83,10 @@ export async function GET(request: Request) {
   const { data: ativos } = await supabase.from('ativos_monitorados').select('*').eq('status_ativo', true);
 
   if (!ativos || ativos.length === 0) {
-    return NextResponse.json({ success: true, message: "Nenhum ativo ativo." });
+    return NextResponse.json({ success: true, message: "Sem ativos." });
   }
 
-  let sinaisEnviadosnestaRodada = 0;
+  let sinaisEnviados = 0;
   let ativosAnalisados = [];
   
   for (const ativo of ativos) {
@@ -90,10 +96,10 @@ export async function GET(request: Request) {
 
     const analysis = await getSurgicalSignal(ativo.ticker, mkt);
 
-    // Se a IA mandar aguardar ou a confiança for menor que 85%, o robô pula de forma segura
-    if (analysis.sinal === "AGUARDAR" || analysis.confianca < 85) continue;
+    // BARRA DE FILTRO REDUZIDA PARA OPERAÇÕES DIÁRIAS (75% de confiança mínima)
+    if (analysis.sinal === "AGUARDAR" || analysis.confianca < 75) continue;
 
-    sinaisEnviadosnestaRodada++;
+    sinaisEnviados++;
     const isCompra = analysis.sinal === 'COMPRA';
     const tagAcao = isCompra ? '🟢 CALL (COMPRA)' : '🔴 PUT (VENDA)';
 
@@ -108,13 +114,12 @@ export async function GET(request: Request) {
     });
   }
 
-  // MENSAGEM DE DIAGNÓSTICO: Envia um aviso dizendo que rodou e o que ele encontrou
   await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       chat_id: process.env.TELEGRAM_CHAT_ID,
-      text: `ℹ️ *Relatório do Gênio:*\nVarredura concluída com sucesso!\n\n📋 *Ativos Verificados:* ${ativosAnalisados.join(', ')}\n🎯 *Sinais Disparados:* ${sinaisEnviadosnestaRodada}\n\n_${sinaisEnviadosnestaRodada === 0 ? 'Nenhuma oportunidade ultra-precisa (>85% confiança) foi detectada neste minuto. O robô segue monitorando de forma segura._' : ''}`,
+      text: `ℹ️ *Relatório do Gênio:*\nVarredura Concluída.\n\n📋 *Ativos:* ${ativosAnalisados.join(', ')}\n🎯 *Sinais:* ${sinaisEnviados}`,
       parse_mode: 'Markdown'
     })
   });
