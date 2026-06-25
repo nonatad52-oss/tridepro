@@ -31,27 +31,26 @@ async function getAdvancedMarketData(ticker: string) {
   }
 }
 
-// 2. Cérebro Focado em Day Trade e Opções Binárias
+// 2. Cérebro Preditivo (Foco em Antecedência de 5 Minutos)
 async function getSurgicalSignal(ticker: string, mkt: any) {
   try {
     const prompt = `
-      Você é um Trader de Elite especialista em Scalping e Opções Binárias (Price Action micro).
-      Analise o ativo ${ticker} para identificar entradas imediatas de CALL/PUT ou Compra/Venda rápida:
+      Você é um Trader Preditivo de Elite especialista em Opções Binárias.
+      Analise o ativo ${ticker} e identifique uma oportunidade que VAI ACONTECER DAQUI A 5 MINUTOS.
       
       MÉTRICAS ATUAIS:
-      - Preço Atual: ${mkt.precoAtual} (Variação do Dia: ${mkt.variacaoDia}%)
+      - Preço Atual: ${mkt.precoAtual} (Variação: ${mkt.variacaoDia}%)
       - Extremos do Dia: Mínima=${mkt.minimaDia} | Máxima=${mkt.maximaDia}
-      - Histórico Recente (Últimos 10 períodos): [${mkt.historico10Dias}]
+      - Histórico (Últimos 10 períodos): [${mkt.historico10Dias}]
 
-      ESTRATÉGIA DE ALTA FREQUÊNCIA:
-      1. Avalie a posição do Preço Atual em relação à Máxima e Mínima do dia para achar suporte/resistência.
-      2. Se o preço atual estiver muito perto da Mínima do dia e o histórico recente mostrar reação, é forte candidato a CALL (Compra).
-      3. Se o preço atual estiver muito perto da Máxima do dia com perda de força, é forte candidato a PUT (Venda).
-      4. Defina tempos rápidos de expiração para Opções Binárias (1 Minuto ou 5 Minutos).
-      5. Só retorne "AGUARDAR" se o preço estiver exatamente travado no mesmo valor do histórico.
+      REGRAS PREDITIVAS (AVISO PRÉVIO):
+      1. NÃO dê um sinal para entrar agora. Projete onde o preço estará em 5 minutos.
+      2. Se o preço está indo em direção a uma resistência forte, o sinal é para um PUT (Venda) daqui a 5 minutos.
+      3. Se o preço está caindo em direção a um suporte forte, o sinal é para um CALL (Compra) daqui a 5 minutos.
+      4. Indique o "preco_alvo_entrada" (o preço exato onde o trader deve dar o clique daqui a 5 minutos).
 
       Retorne APENAS um JSON válido:
-      {"sinal": "COMPRA"|"VENDA"|"AGUARDAR", "confianca": number, "stop_loss": number, "take_profit": number, "expiracao_ob": "1 Minuto"|"5 Minutos"|"15 Minutos", "gatilho_tecnico": "motivo rápido do price action"}
+      {"sinal": "COMPRA"|"VENDA"|"AGUARDAR", "confianca": number, "preco_alvo_entrada": number, "expiracao_ob": "1 Minuto"|"5 Minutos", "gatilho_tecnico": "Explique brevemente a previsão para os próximos 5 minutos"}
     `;
 
     const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -61,14 +60,14 @@ async function getSurgicalSignal(ticker: string, mkt: any) {
         model: "llama3-70b-8192", 
         messages: [{ role: "user", content: prompt }], 
         response_format: { type: "json_object" },
-        temperature: 0.35 // Mais flexível para caçar padrões de velas rápidos
+        temperature: 0.35
       })
     });
     
     const data = await response.json();
     return JSON.parse(data.choices[0].message.content);
   } catch (error) {
-    return { sinal: "AGUARDAR", confianca: 0, stop_loss: 0, take_profit: 0, expiracao_ob: "5 Minutos", gatilho_tecnico: "Erro" };
+    return { sinal: "AGUARDAR", confianca: 0, preco_alvo_entrada: 0, expiracao_ob: "5 Minutos", gatilho_tecnico: "Erro" };
   }
 }
 
@@ -86,6 +85,12 @@ export async function GET(request: Request) {
     return NextResponse.json({ success: true, message: "Sem ativos." });
   }
 
+  // --- LÓGICA DO RELÓGIO (HORÁRIO DE ENTRADA + 5 MINUTOS) ---
+  const dataAtual = new Date();
+  dataAtual.setMinutes(dataAtual.getMinutes() + 5);
+  // Converte para o horário de Brasília para a mensagem do Telegram
+  const horarioEntrada = dataAtual.toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' });
+
   let sinaisEnviados = 0;
   let ativosAnalisados = [];
   
@@ -96,7 +101,6 @@ export async function GET(request: Request) {
 
     const analysis = await getSurgicalSignal(ativo.ticker, mkt);
 
-    // BARRA DE FILTRO REDUZIDA PARA OPERAÇÕES DIÁRIAS (75% de confiança mínima)
     if (analysis.sinal === "AGUARDAR" || analysis.confianca < 75) continue;
 
     sinaisEnviados++;
@@ -108,7 +112,7 @@ export async function GET(request: Request) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         chat_id: process.env.TELEGRAM_CHAT_ID,
-        text: `🧠 *SINAL GÊNIO QUANT PRO*\n\n📈 *Ativo:* #${ativo.ticker.replace('-','_').replace('=','_')}\n🎯 *Operação:* ${tagAcao}\n🔥 *Confiança:* ${analysis.confianca}%\n\n⏱️ *OPÇÕES BINÁRIAS (OB):*\n⏳ *Expiração:* ${analysis.expiracao_ob}\n\n🪙 *MERCADO CRIPTO / TRADICIONAL:*\n💲 *Preço:* $${mkt.precoAtual}\n🛑 *SL:* $${analysis.stop_loss} | 🎯 *TP:* $${analysis.take_profit}\n\n⚡ *Análise:* ${analysis.gatilho_tecnico}`,
+        text: `🧠 *SINAL PREDITIVO GÊNIO PRO*\n\n⏰ *ENTRADA ÀS:* ${horarioEntrada}\n_(Daqui a 5 minutos)_ \n\n📈 *Ativo:* #${ativo.ticker.replace('-','_').replace('=','_')}\n🎯 *Operação:* ${tagAcao}\n🔥 *Confiança:* ${analysis.confianca}%\n\n⏱️ *OPÇÕES BINÁRIAS:*\n⏳ *Expiração:* ${analysis.expiracao_ob}\n🎯 *Preço Alvo (Taxa):* $${analysis.preco_alvo_entrada || mkt.precoAtual}\n\n⚡ *Previsão:* ${analysis.gatilho_tecnico}`,
         parse_mode: 'Markdown'
       })
     });
