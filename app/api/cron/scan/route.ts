@@ -1,152 +1,238 @@
-export const dynamic = 'force-dynamic';
-export const maxDuration = 60;
-
-import { createClient } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
-import yahooFinance from 'yahoo-finance2';
+import { createClient } from '@supabase/supabase-js';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
-// 🧮 MOTOR MATEMÁTICO PROPRIETÁRIO
-function calcularLinhaEMA(precos: number[], periodos: number): number[] {
-  const k = 2 / (periodos + 1);
-  let ema = [precos[0]];
-  for (let i = 1; i < precos.length; i++) ema.push(precos[i] * k + ema[i - 1] * (1 - k));
-  return ema;
+// ============================================================================
+// CONFIGURAÇÕES GERAIS E LIMITES DA VERCEL
+// ============================================================================
+export const maxDuration = 60; // 60 segundos para a IA processar a análise
+export const dynamic = 'force-dynamic';
+
+// Variáveis de Ambiente
+const SUPABASE_URL = process.env.SUPABASE_URL!;
+const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY!;
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN!;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID!;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY!;
+const CRON_SECRET = process.env.CRON_SECRET; 
+
+// Inicialização dos Clientes
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+
+// ============================================================================
+// FUNÇÕES AUXILIARES
+// ============================================================================
+
+// 1. Enviar Aviso de Mercado
+async function enviarAvisoTelegram(texto: string) {
+  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+  await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: TELEGRAM_CHAT_ID,
+      text: texto,
+      parse_mode: 'Markdown',
+    }),
+  });
 }
 
-function calcularRSI(precos: number[], periodos = 14) {
-  if (precos.length < periodos + 1) return 50;
-  let ganhos = 0; let perdas = 0;
-  for (let i = precos.length - periodos; i < precos.length; i++) {
-    const dif = precos[i] - precos[i - 1];
-    if (dif >= 0) ganhos += dif; else perdas -= dif;
+// 2. Enviar Sinal Híbrido (Com Botões)
+async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: number, rsi: number) {
+  const { data: insertData, error } = await supabase
+    .from('historico_operacoes')
+    .insert([{
+      ticker: ativo,
+      sinal: iaData.sinal,
+      taxa_entrada: precoAtual,
+      resultado: 'PENDENTE'
+    }])
+    .select('id')
+    .single();
+
+  if (error || !insertData) {
+    console.error(`Erro ao salvar ${ativo} no banco:`, error);
+    return;
   }
-  const rs = (ganhos / periodos) / (perdas / periodos || 1);
+
+  const mensagem = `
+🎯 *SINAL DE ALTA PRECISÃO (M5)* 🎯
+    
+*Ativo:* ${ativo} (Mercado Aberto)
+*Ação:* ${iaData.sinal === 'COMPRA' ? '🟢 COMPRA (CALL)' : '🔴 VENDA (PUT)'}
+*Preço de Entrada:* ${precoAtual}
+*Expiração:* Próxima Vela (5 minutos)
+    
+📊 *Guardião Matemático:*
+_Exaustão RSI (14):_ ${rsi.toFixed(2)}
+
+🧠 *Auditoria da IA (Fractal 5 Velas):*
+_Probabilidade (Próxima Vela):_ ${iaData.confianca_padrao}
+_Justificativa:_ ${iaData.motivo_fractal}
+  `;
+
+  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+  await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: TELEGRAM_CHAT_ID,
+      text: mensagem,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: '✅ WIN', callback_data: `WIN_${insertData.id}` },
+            { text: '❌ LOSS', callback_data: `LOSS_${insertData.id}` }
+          ]
+        ]
+      }
+    }),
+  });
+}
+
+// 3. Verificar Lockdown (Trava de Segurança Pós-Loss)
+async function verificarLockdown(ativo: string): Promise<boolean> {
+  const { data } = await supabase
+    .from('historico_operacoes')
+    .select('resultado, criado_em')
+    .eq('ticker', ativo)
+    .order('criado_em', { ascending: false })
+    .limit(1); // Olha apenas a última operação
+
+  if (!data || data.length === 0) return false;
+  
+  if (data[0].resultado === 'LOSS') {
+    return true; // Bloqueia o ativo se a última entrada foi Loss
+  }
+  return false;
+}
+
+// 4. Cálculo do Indicador RSI
+function calcularRSI(velas: any[], periodos = 14) {
+  if (velas.length < periodos + 1) return 50;
+  let ganhos = 0, perdas = 0;
+  
+  for (let i = velas.length - periodos; i < velas.length; i++) {
+    const diferenca = velas[i].fechamento - velas[i - 1].fechamento;
+    if (diferenca >= 0) ganhos += diferenca;
+    else perdas -= diferenca;
+  }
+  
+  const mediaGanhos = ganhos / periodos;
+  const mediaPerdas = perdas / periodos;
+  
+  if (mediaPerdas === 0) return 100;
+  const rs = mediaGanhos / mediaPerdas;
   return 100 - (100 / (1 + rs));
 }
 
-function calcularMétricasAceleração(fechamentos: number[]) {
-  if (fechamentos.length < 5) return { aceleracaoCurta: 0, desvioVelocidade: false };
-  const atual = fechamentos[fechamentos.length - 1];
-  const anterior1 = fechamentos[fechamentos.length - 2];
-  const anterior3 = fechamentos[fechamentos.length - 4];
-  const varizacao1Vela = ((atual - anterior1) / anterior1) * 100;
-  const variacao3Velas = ((atual - anterior3) / anterior3) * 100;
-  return {
-    aceleracaoCurta: Number(varizacao1Vela.toFixed(4)),
-    desvioVelocidade: Math.abs(varizacao1Vela) > Math.abs(variacao3Velas) * 1.5
-  };
-}
-
-function calcularStressScore(fechamentos: number[], rsi: number, precoAtual: number, ema21: number) {
-  let score = 0;
-  const distanciaMedia = ((precoAtual - ema21) / ema21) * 100;
-  if (Math.abs(distanciaMedia) > 0.35) score += 35; 
-  else if (Math.abs(distanciaMedia) > 0.20) score += 20;
-
-  if (rsi > 75 || rsi < 25) score += 35; 
-  else if (rsi > 68 || rsi < 32) score += 15;
-
-  const { desvioVelocidade } = calcularMétricasAceleração(fechamentos);
-  if (desvioVelocidade) score += 30; 
-
-  return { scoreTotal: score, distanciaMedia: distanciaMedia.toFixed(4), desvioVelocidade };
-}
-
-// 🛡️ MEMÓRIA DE LOSS E REGISTRO
-async function verificarBloqueioPorLoss(supabase: any, ticker: string): Promise<boolean> {
-  try {
-    const tresHorasAtras = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
-    const { data: ultimas } = await supabase.from('historico_operacoes')
-      .select('resultado').eq('ticker', ticker).gt('criado_em', tresHorasAtras).order('criado_em', { ascending: false }).limit(2);
-    if (ultimas && ultimas.length >= 2) return ultimas.every((op: any) => op.resultado === 'LOSS');
-    return false;
-  } catch (e) { return false; }
-}
-
-async function registrarOperacaoNoBanco(supabase: any, ticker: string, sinal: string, taxa: number) {
-  try {
-    const { data } = await supabase.from('historico_operacoes').insert([{
-      ticker, sinal, taxa_entrada: taxa, resultado: 'PENDENTE', criado_em: new Date().toISOString()
-    }]).select('id').single();
-    return data ? data.id : null;
-  } catch (e) { return null; }
-}
-
-// 👁️ AUDITORIA IA
-async function auditoriaIA(ticker: string, mkt: any, stress: any) {
-  try {
-    const prompt = `Analise: ${ticker} | Preço: ${mkt.precoAtual} | Score Estresse: ${stress.scoreTotal}/100 | RSI: ${mkt.rsi} | Aceleração: ${mkt.aceleracao}%.
-    Decida se é exaustão real ou tendência forte. Se score < 60 ou aceleração direcional sem pausa, retorne AGUARDAR.
-    Retorne JSON: {"sinal": "COMPRA"|"VENDA"|"AGUARDAR", "confianca": number, "justificativa_metrica": "Motivo curto"}`;
-
-    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: "llama3-70b-8192", messages: [{ role: "user", content: prompt }], response_format: { type: "json_object" }, temperature: 0.15 })
-    });
-    return JSON.parse((await response.json()).choices[0].message.content);
-  } catch (e) { return { sinal: "AGUARDAR", confianca: 0 }; }
-}
-
-// 🚀 ORQUESTRADOR
+// ============================================================================
+// MOTOR PRINCIPAL (CRON JOB)
+// ============================================================================
 export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
-  if (searchParams.get('key') !== process.env.CRON_SECRET) return new NextResponse('Unauthorized', { status: 401 });
+  try {
+    // 1. Verificação da Chave
+    const { searchParams } = new URL(request.url);
+    if (searchParams.get('key') !== CRON_SECRET) {
+      return NextResponse.json({ error: 'Não autorizado' }, { status: 401 });
+    }
 
-  const supabase = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
-  const { data: ativos } = await supabase.from('ativos_global').select('*').eq('status_ativo', true);
+    // 2. Alertas de Abertura de Mercado
+    const agora = new Date();
+    const hora = agora.toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", hour: "2-digit" });
+    const minuto = agora.toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", minute: "2-digit" });
+    const horarioAtual = `${hora}:${minuto}`;
 
-  if (!ativos || ativos.length === 0) return NextResponse.json({ success: true });
+    if (horarioAtual === "21:00") {
+      await enviarAvisoTelegram("🌏 *Mercado Asiático Aberto!*\nAnalisando volatilidade inicial...");
+    } else if (horarioAtual === "04:00") {
+      await enviarAvisoTelegram("🇪🇺 *Mercado Europeu Aberto!*\nBuscando padrões institucionais de alto volume...");
+    } else if (horarioAtual === "10:30") {
+      await enviarAvisoTelegram("🇺🇸 *Mercado Americano Aberto!*\nPico de volatilidade detectado. Varredura agressiva iniciada...");
+    }
 
-  const horaSinalizada = new Date(Date.now() + 5 * 60000).toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' });
+    // 3. Buscar Ativos da Tabela Global (Apenas ativos do mercado real)
+    const { data: ativosDB, error: erroDB } = await supabase
+      .from('ativos_global')
+      .select('ticker')
+      .eq('status', 'ativo');
 
-  for (const ativo of ativos) {
-    try {
-      if (await verificarBloqueioPorLoss(supabase, ativo.ticker)) continue;
+    if (erroDB || !ativosDB || ativosDB.length === 0) {
+      return NextResponse.json({ success: true, message: "Nenhum ativo listado ou ativo no banco." });
+    }
 
-      const diasAtras = new Date(Date.now() - 35 * 24 * 60 * 60 * 1000);
-      // @ts-ignore
-      const historical = await yahooFinance.historical(ativo.ticker, { period1: diasAtras });
-      // @ts-ignore
-      const quote = await yahooFinance.quote(ativo.ticker);
+    const ativos = ativosDB.map(a => a.ticker);
 
-      const fechamentos = historical.map(dia => Number(dia.close));
-      const precoAtual = quote.regularMarketPrice || fechamentos[fechamentos.length - 1];
-      const rsi = calcularRSI(fechamentos, 14);
-      const ema21 = calcularLinhaEMA(fechamentos, 21).pop() || precoAtual;
-      const metricsAcel = calcularMétricasAceleração(fechamentos);
-      const stress = calcularStressScore(fechamentos, rsi, precoAtual, ema21);
+    // 4. Iniciar Varredura Híbrida
+    for (const ativo of ativos) {
+      if (await verificarLockdown(ativo)) {
+        console.log(`[${ativo}] Ignorado: Quarentena de LOSS ativada.`);
+        continue;
+      }
 
-      if (stress.scoreTotal < 60) continue;
-
-      const auditoria = await auditoriaIA(ativo.ticker, { precoAtual, rsi: rsi.toFixed(2), aceleracao: metricsAcel.aceleracaoCurta }, stress);
-      if (auditoria.sinal === "AGUARDAR" || auditoria.confianca < 75) continue;
-
-      // Grava no banco e pega a ID
-      const operacaoId = await registrarOperacaoNoBanco(supabase, ativo.ticker, auditoria.sinal, precoAtual);
-
-      const direcaoSinal = auditoria.sinal === 'COMPRA' ? '🟢 CALL (COMPRA)' : '🔴 PUT (VENDA)';
-      const tagAtivo = ativo.ticker.replace('-','_').replace('=','_');
+      // Busca 20 velas de 5 minutos na Binance
+      const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=${ativo}&interval=5m&limit=20`);
+      if (!res.ok) continue;
       
-      // Monta os botões atrelados à ID
-      const tecladoInline = operacaoId ? {
-        inline_keyboard: [
-          [{ text: "✅ WIN", callback_data: `res_WIN_${operacaoId}` }, { text: "❌ LOSS", callback_data: `res_LOSS_${operacaoId}` }]
-        ]
-      } : undefined;
+      const dadosBrutos = await res.json();
+      const velasMatematica = dadosBrutos.map((c: any) => ({ fechamento: parseFloat(c[4]) }));
+      
+      // Isola apenas as últimas 5 velas para a IA analisar
+      const ultimas5Velas = dadosBrutos.slice(-5).map((c: any) => ({
+        abertura: parseFloat(c[1]), maxima: parseFloat(c[2]), minima: parseFloat(c[3]), fechamento: parseFloat(c[4])
+      }));
 
-      await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: process.env.TELEGRAM_CHAT_ID,
-          text: `⚡ *SUPER ANALISADOR QUANT*\n\n📈 *Ativo:* #${tagAtivo}\n🎯 *Operação:* ${direcaoSinal}\n⏰ *Entrada:* ${horaSinalizada}\n⏳ *Expiração:* 5 Minutos\n🎯 *Taxa:* $${precoAtual}\n🔥 *Confiança:* ${auditoria.confianca}%\n\n🌐 *Auditoria:* _${auditoria.justificativa_metrica}_\n\n👇 *Registre o resultado abaixo:*`,
-          parse_mode: 'Markdown',
-          reply_markup: tecladoInline
-        })
-      });
+      // AVALIAÇÃO 1: MATEMÁTICA (RSI Exaustão)
+      const rsiAtual = calcularRSI(velasMatematica, 14);
+      let preSinalMatematico = 'NEUTRO';
+      
+      if (rsiAtual >= 75) preSinalMatematico = 'VENDA'; // Muito sobrecomprado
+      else if (rsiAtual <= 25) preSinalMatematico = 'COMPRA'; // Muito sobrevendido
 
-    } catch (e) { continue; }
+      if (preSinalMatematico === 'NEUTRO') continue; // Pula se não houver exaustão
+
+      // AVALIAÇÃO 2: AUDITORIA DA IA
+      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+      const promptHibrido = `
+        O indicador RSI detectou exaustão extrema (${rsiAtual.toFixed(2)}) e sugere ${preSinalMatematico} para ${ativo}.
+        
+        Você é um algoritmo Quant. Analise estas últimas 5 velas de 5 minutos:
+        ${JSON.stringify(ultimas5Velas)}
+        
+        Regra:
+        1. Projeção Imediata: Baseado na geometria deste fractal, qual é o comportamento estatístico da EXATA PRÓXIMA VELA de 5 minutos?
+        
+        Retorne estritamente um JSON neste formato:
+        {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%", "motivo_fractal": "Sinergia exata encontrada..."}
+        
+        SÓ valide o sinal se concordar com a indicação da matemática (${preSinalMatematico}) E a probabilidade de acerto na próxima vela for maior que 85%.
+      `;
+
+      try {
+        const result = await model.generateContent(promptHibrido);
+        const responseText = result.response.text().replace(/```json/g, '').replace(/```/g, '').trim();
+        const iaData = JSON.parse(responseText);
+        
+        const confiancaNumero = parseInt(iaData.confianca_padrao.replace('%', ''));
+
+        // Sinergia alcançada: Matemática + IA
+        if (iaData.sinal === preSinalMatematico && confiancaNumero >= 85) {
+          console.log(`[${ativo}] SINAL VALIDADO: RSI ${rsiAtual.toFixed(2)} + IA ${iaData.confianca_padrao}`);
+          await enviarSinalTelegram(ativo, iaData, ultimas5Velas[4].fechamento, rsiAtual);
+        } else {
+          console.log(`[${ativo}] Descartado pela IA. Confiança: ${iaData.confianca_padrao}`);
+        }
+      } catch (e) {
+        console.error(`[${ativo}] Erro ao ler resposta da IA. Ignorando.`);
+      }
+    }
+
+    return NextResponse.json({ success: true, message: "Varredura Concluída." });
+
+  } catch (error) {
+    console.error("Erro geral no sistema:", error);
+    return NextResponse.json({ error: 'Erro interno' }, { status: 500 });
   }
-
-  return NextResponse.json({ success: true });
 }
