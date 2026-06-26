@@ -5,16 +5,16 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 // ============================================================================
 // CONFIGURAÇÕES GERAIS E LIMITES DA VERCEL
 // ============================================================================
-export const maxDuration = 60; // 60 segundos para a IA processar a análise
+export const maxDuration = 60; 
 export const dynamic = 'force-dynamic';
 
-// Variáveis de Ambiente
-const SUPABASE_URL = process.env.SUPABASE_URL!;
-const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY!;
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN!;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID!;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY!;
-const CRON_SECRET = process.env.CRON_SECRET; 
+// Variaveis de Ambiente com "Fallback" (Evita erro 500 no build da Vercel)
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://placeholder.supabase.co';
+const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY || 'chave-temporaria-para-build';
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || 'token-temporario';
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || 'id-temporario';
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'chave-temporaria';
+const CRON_SECRET = process.env.CRON_SECRET || '17a85b09'; 
 
 // Inicialização dos Clientes
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -24,7 +24,6 @@ const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 // FUNÇÕES AUXILIARES
 // ============================================================================
 
-// 1. Enviar Aviso de Mercado
 async function enviarAvisoTelegram(texto: string) {
   const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
   await fetch(url, {
@@ -38,7 +37,6 @@ async function enviarAvisoTelegram(texto: string) {
   });
 }
 
-// 2. Enviar Sinal Híbrido (Com Botões)
 async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: number, rsi: number) {
   const { data: insertData, error } = await supabase
     .from('historico_operacoes')
@@ -92,24 +90,22 @@ _Justificativa:_ ${iaData.motivo_fractal}
   });
 }
 
-// 3. Verificar Lockdown (Trava de Segurança Pós-Loss)
 async function verificarLockdown(ativo: string): Promise<boolean> {
   const { data } = await supabase
     .from('historico_operacoes')
     .select('resultado, criado_em')
     .eq('ticker', ativo)
     .order('criado_em', { ascending: false })
-    .limit(1); // Olha apenas a última operação
+    .limit(1);
 
   if (!data || data.length === 0) return false;
   
   if (data[0].resultado === 'LOSS') {
-    return true; // Bloqueia o ativo se a última entrada foi Loss
+    return true;
   }
   return false;
 }
 
-// 4. Cálculo do Indicador RSI
 function calcularRSI(velas: any[], periodos = 14) {
   if (velas.length < periodos + 1) return 50;
   let ganhos = 0, perdas = 0;
@@ -133,13 +129,11 @@ function calcularRSI(velas: any[], periodos = 14) {
 // ============================================================================
 export async function GET(request: Request) {
   try {
-    // 1. Verificação da Chave
     const { searchParams } = new URL(request.url);
     if (searchParams.get('key') !== CRON_SECRET) {
       return NextResponse.json({ error: 'Não autorizado' }, { status: 401 });
     }
 
-    // 2. Alertas de Abertura de Mercado
     const agora = new Date();
     const hora = agora.toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", hour: "2-digit" });
     const minuto = agora.toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", minute: "2-digit" });
@@ -153,7 +147,6 @@ export async function GET(request: Request) {
       await enviarAvisoTelegram("🇺🇸 *Mercado Americano Aberto!*\nPico de volatilidade detectado. Varredura agressiva iniciada...");
     }
 
-    // 3. Buscar Ativos da Tabela Global (Apenas ativos do mercado real)
     const { data: ativosDB, error: erroDB } = await supabase
       .from('ativos_global')
       .select('ticker')
@@ -165,35 +158,29 @@ export async function GET(request: Request) {
 
     const ativos = ativosDB.map(a => a.ticker);
 
-    // 4. Iniciar Varredura Híbrida
     for (const ativo of ativos) {
       if (await verificarLockdown(ativo)) {
-        console.log(`[${ativo}] Ignorado: Quarentena de LOSS ativada.`);
         continue;
       }
 
-      // Busca 20 velas de 5 minutos na Binance
       const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=${ativo}&interval=5m&limit=20`);
       if (!res.ok) continue;
       
       const dadosBrutos = await res.json();
       const velasMatematica = dadosBrutos.map((c: any) => ({ fechamento: parseFloat(c[4]) }));
       
-      // Isola apenas as últimas 5 velas para a IA analisar
       const ultimas5Velas = dadosBrutos.slice(-5).map((c: any) => ({
         abertura: parseFloat(c[1]), maxima: parseFloat(c[2]), minima: parseFloat(c[3]), fechamento: parseFloat(c[4])
       }));
 
-      // AVALIAÇÃO 1: MATEMÁTICA (RSI Exaustão)
       const rsiAtual = calcularRSI(velasMatematica, 14);
       let preSinalMatematico = 'NEUTRO';
       
-      if (rsiAtual >= 75) preSinalMatematico = 'VENDA'; // Muito sobrecomprado
-      else if (rsiAtual <= 25) preSinalMatematico = 'COMPRA'; // Muito sobrevendido
+      if (rsiAtual >= 75) preSinalMatematico = 'VENDA';
+      else if (rsiAtual <= 25) preSinalMatematico = 'COMPRA';
 
-      if (preSinalMatematico === 'NEUTRO') continue; // Pula se não houver exaustão
+      if (preSinalMatematico === 'NEUTRO') continue;
 
-      // AVALIAÇÃO 2: AUDITORIA DA IA
       const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
       const promptHibrido = `
         O indicador RSI detectou exaustão extrema (${rsiAtual.toFixed(2)}) e sugere ${preSinalMatematico} para ${ativo}.
@@ -217,22 +204,17 @@ export async function GET(request: Request) {
         
         const confiancaNumero = parseInt(iaData.confianca_padrao.replace('%', ''));
 
-        // Sinergia alcançada: Matemática + IA
         if (iaData.sinal === preSinalMatematico && confiancaNumero >= 85) {
-          console.log(`[${ativo}] SINAL VALIDADO: RSI ${rsiAtual.toFixed(2)} + IA ${iaData.confianca_padrao}`);
           await enviarSinalTelegram(ativo, iaData, ultimas5Velas[4].fechamento, rsiAtual);
-        } else {
-          console.log(`[${ativo}] Descartado pela IA. Confiança: ${iaData.confianca_padrao}`);
         }
       } catch (e) {
-        console.error(`[${ativo}] Erro ao ler resposta da IA. Ignorando.`);
+        console.error(`[${ativo}] Erro na IA. Ignorando.`);
       }
     }
 
     return NextResponse.json({ success: true, message: "Varredura Concluída." });
 
   } catch (error) {
-    console.error("Erro geral no sistema:", error);
     return NextResponse.json({ error: 'Erro interno' }, { status: 500 });
   }
 }
