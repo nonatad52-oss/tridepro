@@ -5,7 +5,6 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 export const maxDuration = 60; 
 export const dynamic = 'force-dynamic';
 
-// Tenta pegar a variável de todas as formas possíveis no Next.js
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || 'https://placeholder.supabase.co';
 const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || 'chave-temporaria';
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || 'token-temporario';
@@ -59,16 +58,14 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     if (searchParams.get('key') !== CRON_SECRET) return NextResponse.json({ error: 'Não autorizado' }, { status: 401 });
 
-    // RAIO-X: Verifica se o banco de dados retorna erro
     const { data: ativosDB, error: erroDB } = await supabase.from('ativos_global').select('ticker').eq('status', 'ativo');
 
-    // Se o banco de dados travar por chave inválida ou permissão, ele vai mostrar o erro exato na tela!
     if (erroDB) {
       return NextResponse.json({ 
         sucesso: false, 
         motivo: "O Supabase bloqueou a conexão!", 
         detalhes_do_erro: erroDB,
-        url_usada: SUPABASE_URL === 'https://placeholder.supabase.co' ? 'Vercel não encontrou sua URL' : 'URL parece correta'
+        url_usada: SUPABASE_URL === 'https://placeholder.supabase.co' ? 'Vercel não encontrou a URL' : 'URL parece correta'
       });
     }
 
@@ -113,7 +110,7 @@ export async function GET(request: Request) {
         Últimas 20 velas M5: ${JSON.stringify(validas)}.
         Qual o tamanho de fractal recente valida esse sinal para a próx vela? Responda estrito JSON: {"sinal": "COMPRA"|"VENDA"|"NEUTRO", "confianca_padrao": "XX%", "motivo_fractal": "..."} - SÓ SINAL SE CONFIANÇA >= 85%.`;
 
-        const result = await genAI.getGenerativeModel({ model: "gemini-1.5-flash" }).generateContent(prompt);
+        const result = await genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" }).generateContent(prompt);
         const iaData = JSON.parse(result.response.text().replace(/```json/g, '').replace(/```/g, '').trim());
         
         if (iaData.sinal === preSinal && parseInt(iaData.confianca_padrao) >= 85) {
