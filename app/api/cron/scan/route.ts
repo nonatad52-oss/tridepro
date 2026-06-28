@@ -58,22 +58,38 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     if (searchParams.get('key') !== CRON_SECRET) return NextResponse.json({ error: 'Não autorizado' }, { status: 401 });
 
-    const { data: ativosDB, error: erroDB } = await supabase.from('ativos_global').select('ticker').eq('status', 'ativo');
-
-    if (erroDB) {
-      return NextResponse.json({ 
-        sucesso: false, 
-        motivo: "O Supabase bloqueou a conexão!", 
-        detalhes_do_erro: erroDB,
-        url_usada: SUPABASE_URL === 'https://placeholder.supabase.co' ? 'Vercel não encontrou a URL' : 'URL parece correta'
-      });
+    // 📡 RADAR DE MODELOS AUTOMÁTICO (Fim dos erros 404)
+    let nomeDoModelo = "gemini-1.5-flash"; 
+    const checkModelos = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}`);
+    const jsonModelos = await checkModelos.json();
+    
+    if (jsonModelos.error) {
+       return NextResponse.json({ 
+         sucesso: false, 
+         motivo: "O Google recusou a sua chave da API!", 
+         detalhes: jsonModelos.error 
+       });
     }
 
+    if (jsonModelos.models) {
+        const geradores = jsonModelos.models.filter((m: any) => m.supportedGenerationMethods?.includes('generateContent'));
+        const modeloIdeal = geradores.find((m: any) => m.name.includes('flash')) || geradores.find((m: any) => m.name.includes('pro')) || geradores[0];
+        if (modeloIdeal) {
+            nomeDoModelo = modeloIdeal.name.replace('models/', '');
+        }
+    }
+
+    // Validação do Supabase
+    const { data: ativosDB, error: erroDB } = await supabase.from('ativos_global').select('ticker').eq('status', 'ativo');
+    if (erroDB) {
+      return NextResponse.json({ sucesso: false, motivo: "O Supabase bloqueou a conexão!", detalhes_do_erro: erroDB });
+    }
     if (!ativosDB || ativosDB.length === 0) {
       return NextResponse.json({ sucesso: true, message: "Conectou no banco perfeito, mas a tabela ativos_global está vazia." });
     }
 
     const ativos = ativosDB.map(a => a.ticker);
+    let varreduras = 0;
 
     for (const ativo of ativos) {
       try {
@@ -106,23 +122,32 @@ export async function GET(request: Request) {
 
         if (preSinal === 'NEUTRO') continue;
 
+        varreduras++;
         const prompt = `Ativo ${ativo}. RSI ${rsiAtual.toFixed(2)}. Gatilho ${preSinal}.
         Últimas 20 velas M5: ${JSON.stringify(validas)}.
         Qual o tamanho de fractal recente valida esse sinal para a próx vela? Responda estrito JSON: {"sinal": "COMPRA"|"VENDA"|"NEUTRO", "confianca_padrao": "XX%", "motivo_fractal": "..."} - SÓ SINAL SE CONFIANÇA >= 85%.`;
 
-        // AQUI FOI FEITA A ALTERAÇÃO PARA O GEMINI-PRO
-        const result = await genAI.getGenerativeModel({ model: "gemini-pro" }).generateContent(prompt);
-        const iaData = JSON.parse(result.response.text().replace(/```json/g, '').replace(/```/g, '').trim());
+        // Chama a IA usando o modelo perfeito que o Radar encontrou
+        const result = await genAI.getGenerativeModel({ model: nomeDoModelo }).generateContent(prompt);
+        const textResponse = result.response.text();
+        const iaData = JSON.parse(textResponse.replace(/```json/g, '').replace(/```/g, '').trim());
         
         if (iaData.sinal === preSinal && parseInt(iaData.confianca_padrao) >= 85) {
           await enviarSinalTelegram(ativo, iaData, validas[validas.length - 1].fechamento, rsiAtual);
         }
-      } catch (e) { console.error(e); }
+      } catch (e) { 
+        console.error(`Erro ao analisar ${ativo}:`, e); 
+      }
     }
 
-    return NextResponse.json({ success: true, message: "Varredura Concluída com Sucesso", moedas_analisadas: ativos.length });
+    return NextResponse.json({ 
+      success: true, 
+      message: "Varredura Concluída com Sucesso", 
+      moedas_analisadas: ativos.length,
+      modelo_ia_utilizado: nomeDoModelo
+    });
 
   } catch (error) {
-    return NextResponse.json({ error: 'Erro interno' }, { status: 500 });
+    return NextResponse.json({ error: 'Erro interno no servidor' }, { status: 500 });
   }
 }
