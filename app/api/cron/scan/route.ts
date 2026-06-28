@@ -16,6 +16,31 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
 async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: number, rsi: number) {
+  // 1. Formatação do Nome do Ativo (Ex: CHFJPY=X vira CHF/JPY e BTC-USD vira BTC/USD)
+  let ativoFormatado = ativo;
+  if (ativo.endsWith('=X') && ativo.length === 8) {
+    ativoFormatado = ativo.substring(0, 3) + '/' + ativo.substring(3, 6);
+  } else if (ativo.includes('-')) {
+    ativoFormatado = ativo.replace('-', '/');
+  }
+
+  // 2. Cálculo dos Horários para M5 (Fuso de Brasília)
+  const formatadorHora = new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' });
+  const agora = new Date();
+  
+  // Arredonda para a próxima vela múltipla de 5 minutos
+  const proximaVela = new Date(agora);
+  proximaVela.setMinutes(agora.getMinutes() + (5 - (agora.getMinutes() % 5)));
+  proximaVela.setSeconds(0);
+  
+  // Adiciona 5 minutos para o tempo de expiração
+  const expiracao = new Date(proximaVela);
+  expiracao.setMinutes(expiracao.getMinutes() + 5);
+
+  const strEntrada = formatadorHora.format(proximaVela);
+  const strExpiracao = formatadorHora.format(expiracao);
+
+  // 3. Salva no Banco (O preço atual vai pro banco para estatísticas, mas não vai pro Telegram)
   const { data: insertData, error } = await supabase
     .from('historico_operacoes')
     .insert([{ ticker: ativo, sinal: iaData.sinal, taxa_entrada: precoAtual, resultado: 'PENDENTE' }])
@@ -23,7 +48,9 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
 
   if (error || !insertData) return;
 
-  const mensagem = `🎯 *SINAL (M5)* 🎯\n*Ativo:* ${ativo}\n*Ação:* ${iaData.sinal === 'COMPRA' ? '🟢 COMPRA' : '🔴 VENDA'}\n*Preço:* ${precoAtual}\n📊 RSI: ${rsi.toFixed(2)}\n🧠 Confiança: ${iaData.confianca_padrao}`;
+  // 4. Monta e envia a Mensagem Limpa
+  const mensagem = `🎯 *SINAL (M5)* 🎯\n*Ativo:* ${ativoFormatado}\n*Ação:* ${iaData.sinal === 'COMPRA' ? '🟢 COMPRA' : '🔴 VENDA'}\n⏰ *Entrada:* ${strEntrada}\n⏳ *Expiração:* ${strExpiracao}\n📊 RSI: ${rsi.toFixed(2)}\n🧠 Confiança: ${iaData.confianca_padrao}`;
+  
   await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -58,31 +85,18 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     if (searchParams.get('key') !== CRON_SECRET) return NextResponse.json({ error: 'Não autorizado' }, { status: 401 });
 
-    // 📡 RADAR DE MODELOS AUTOMÁTICO (Fim dos erros 404 da IA)
     let nomeDoModelo = "gemini-1.5-flash"; 
     const checkModelos = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}`);
     const jsonModelos = await checkModelos.json();
     
-    if (jsonModelos.error) {
-       return NextResponse.json({ sucesso: false, motivo: "O Google recusou a sua chave da API!", detalhes: jsonModelos.error });
-    }
-
-    if (jsonModelos.models) {
+    if (!jsonModelos.error && jsonModelos.models) {
         const geradores = jsonModelos.models.filter((m: any) => m.supportedGenerationMethods?.includes('generateContent'));
         const modeloIdeal = geradores.find((m: any) => m.name.includes('flash')) || geradores.find((m: any) => m.name.includes('pro')) || geradores[0];
-        if (modeloIdeal) {
-            nomeDoModelo = modeloIdeal.name.replace('models/', '');
-        }
+        if (modeloIdeal) nomeDoModelo = modeloIdeal.name.replace('models/', '');
     }
 
-    // Validação do Supabase
     const { data: ativosDB, error: erroDB } = await supabase.from('ativos_global').select('ticker').eq('status', 'ativo');
-    if (erroDB) {
-      return NextResponse.json({ sucesso: false, motivo: "O Supabase bloqueou a conexão!", detalhes_do_erro: erroDB });
-    }
-    if (!ativosDB || ativosDB.length === 0) {
-      return NextResponse.json({ sucesso: true, message: "Conectou no banco, mas a tabela ativos_global está vazia." });
-    }
+    if (erroDB || !ativosDB || ativosDB.length === 0) return NextResponse.json({ sucesso: true, message: "Sem ativos ou erro no DB." });
 
     const ativos = ativosDB.map(a => a.ticker);
 
@@ -131,7 +145,7 @@ export async function GET(request: Request) {
       } catch (e) { console.error(e); }
     }
 
-    return NextResponse.json({ success: true, message: "Varredura Concluída com Sucesso", moedas_analisadas: ativos.length, modelo_ia_utilizado: nomeDoModelo });
+    return NextResponse.json({ success: true, message: "Varredura Concluída" });
 
   } catch (error) {
     return NextResponse.json({ error: 'Erro interno no servidor' }, { status: 500 });
