@@ -110,7 +110,8 @@ export async function GET(request: Request) {
         Últimas 20 velas M5: ${JSON.stringify(validas)}.
         Qual o tamanho de fractal recente valida esse sinal para a próx vela? Responda estrito JSON: {"sinal": "COMPRA"|"VENDA"|"NEUTRO", "confianca_padrao": "XX%", "motivo_fractal": "..."} - SÓ SINAL SE CONFIANÇA >= 85%.`;
 
-        const result = await genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" }).generateContent(prompt);
+        // AQUI FOI FEITA A ALTERAÇÃO PARA O GEMINI-PRO
+        const result = await genAI.getGenerativeModel({ model: "gemini-pro" }).generateContent(prompt);
         const iaData = JSON.parse(result.response.text().replace(/```json/g, '').replace(/```/g, '').trim());
         
         if (iaData.sinal === preSinal && parseInt(iaData.confianca_padrao) >= 85) {
