@@ -16,138 +16,65 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
 async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: number, rsi: number) {
-  // 1. Formatação do Nome do Ativo (Ex: CHFJPY=X vira CHF/JPY e BTC-USD vira BTC/USD)
-  let ativoFormatado = ativo;
-  if (ativo.endsWith('=X') && ativo.length === 8) {
-    ativoFormatado = ativo.substring(0, 3) + '/' + ativo.substring(3, 6);
-  } else if (ativo.includes('-')) {
-    ativoFormatado = ativo.replace('-', '/');
-  }
-
-  // 2. Cálculo dos Horários para M5 (Fuso de Brasília)
+  let ativoFormatado = ativo.endsWith('=X') ? ativo.substring(0, 3) + '/' + ativo.substring(3, 6) : ativo.replace('-', '/');
+  
   const formatadorHora = new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' });
   const agora = new Date();
-  
-  // Arredonda para a próxima vela múltipla de 5 minutos
   const proximaVela = new Date(agora);
   proximaVela.setMinutes(agora.getMinutes() + (5 - (agora.getMinutes() % 5)));
   proximaVela.setSeconds(0);
-  
-  // Adiciona 5 minutos para o tempo de expiração
   const expiracao = new Date(proximaVela);
   expiracao.setMinutes(expiracao.getMinutes() + 5);
 
-  const strEntrada = formatadorHora.format(proximaVela);
-  const strExpiracao = formatadorHora.format(expiracao);
-
-  // 3. Salva no Banco (O preço atual vai pro banco para estatísticas, mas não vai pro Telegram)
-  const { data: insertData, error } = await supabase
+  const { data: insertData } = await supabase
     .from('historico_operacoes')
     .insert([{ ticker: ativo, sinal: iaData.sinal, taxa_entrada: precoAtual, resultado: 'PENDENTE' }])
     .select('id').single();
 
-  if (error || !insertData) return;
+  if (!insertData) return;
 
-  // 4. Monta e envia a Mensagem Limpa
-  const mensagem = `🎯 *SINAL (M5)* 🎯\n*Ativo:* ${ativoFormatado}\n*Ação:* ${iaData.sinal === 'COMPRA' ? '🟢 COMPRA' : '🔴 VENDA'}\n⏰ *Entrada:* ${strEntrada}\n⏳ *Expiração:* ${strExpiracao}\n📊 RSI: ${rsi.toFixed(2)}\n🧠 Confiança: ${iaData.confianca_padrao}`;
+  const mensagem = `🎯 *SINAL (M5)* 🎯\n*Ativo:* ${ativoFormatado}\n*Ação:* ${iaData.sinal === 'COMPRA' ? '🟢 COMPRA' : '🔴 VENDA'}\n⏰ *Entrada:* ${formatadorHora.format(proximaVela)}\n⏳ *Expiração:* ${formatadorHora.format(expiracao)}\n📊 RSI: ${rsi.toFixed(2)}\n🧠 Confiança: ${iaData.confianca_padrao}`;
   
   await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: TELEGRAM_CHAT_ID, text: mensagem, parse_mode: 'Markdown',
-      reply_markup: { inline_keyboard: [[{ text: '✅ WIN', callback_data: `WIN_${insertData.id}` }, { text: '❌ LOSS', callback_data: `LOSS_${insertData.id}` }]] }
-    }),
+    body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text: mensagem, parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '✅ WIN', callback_data: `WIN_${insertData.id}` }, { text: '❌ LOSS', callback_data: `LOSS_${insertData.id}` }]] } }),
   });
 }
 
-async function verificarLockdown(ativo: string): Promise<boolean> {
-  try {
-    const { data } = await supabase.from('historico_operacoes').select('resultado').eq('ticker', ativo).order('criado_em', { ascending: false }).limit(1);
-    if (!data || data.length === 0) return false;
-    return data[0].resultado === 'LOSS';
-  } catch (e) { return false; }
-}
-
-function calcularRSI(velas: any[], periodos = 14) {
-  if (velas.length < periodos + 1) return 50;
-  let ganhos = 0; let perdas = 0;
-  for (let i = velas.length - periodos; i < velas.length; i++) {
-    const dif = velas[i].fechamento - velas[i - 1].fechamento;
-    if (dif >= 0) ganhos += dif; else perdas -= dif;
-  }
-  const medG = ganhos / periodos; const medP = perdas / periodos;
-  if (medP === 0) return 100;
-  return 100 - (100 / (1 + (medG / medP)));
-}
-
 export async function GET(request: Request) {
-  try {
-    const { searchParams } = new URL(request.url);
-    if (searchParams.get('key') !== CRON_SECRET) return NextResponse.json({ error: 'Não autorizado' }, { status: 401 });
+  const { searchParams } = new URL(request.url);
+  if (searchParams.get('key') !== CRON_SECRET) return NextResponse.json({ error: 'Não autorizado' }, { status: 401 });
 
-    let nomeDoModelo = "gemini-1.5-flash"; 
-    const checkModelos = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}`);
-    const jsonModelos = await checkModelos.json();
-    
-    if (!jsonModelos.error && jsonModelos.models) {
-        const geradores = jsonModelos.models.filter((m: any) => m.supportedGenerationMethods?.includes('generateContent'));
-        const modeloIdeal = geradores.find((m: any) => m.name.includes('flash')) || geradores.find((m: any) => m.name.includes('pro')) || geradores[0];
-        if (modeloIdeal) nomeDoModelo = modeloIdeal.name.replace('models/', '');
-    }
+  const { data: ativosDB } = await supabase.from('ativos_global').select('ticker').eq('status', 'ativo');
+  if (!ativosDB) return NextResponse.json({ error: "Erro ao buscar ativos" });
 
-    const { data: ativosDB, error: erroDB } = await supabase.from('ativos_global').select('ticker').eq('status', 'ativo');
-    if (erroDB || !ativosDB || ativosDB.length === 0) return NextResponse.json({ sucesso: true, message: "Sem ativos ou erro no DB." });
+  const ativos = ativosDB.map(a => a.ticker);
+  const analisados: string[] = [];
 
-    const ativos = ativosDB.map(a => a.ticker);
+  for (const ativo of ativos) {
+    console.log(`📡 Analisando o ativo: ${ativo}...`);
+    analisados.push(ativo);
+    try {
+      const res = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=5m&range=1d`);
+      const json = await res.json();
+      const quote = json.chart?.result?.[0]?.indicators?.quote?.[0];
+      if (!quote) continue;
 
-    for (const ativo of ativos) {
-      try {
-        if (await verificarLockdown(ativo)) continue;
+      const velas = quote.open.map((o: any, i: number) => ({ fechamento: quote.close[i] })).slice(-20);
+      const rsi = 100 - (100 / (1 + (velas.slice(-14).reduce((g: number, v: any, i: number, arr: any[]) => i > 0 && v.fechamento > arr[i-1].fechamento ? g + (v.fechamento - arr[i-1].fechamento) : g, 0) / 14 / (velas.slice(-14).reduce((p: number, v: any, i: number, arr: any[]) => i > 0 && v.fechamento < arr[i-1].fechamento ? p + (arr[i-1].fechamento - v.fechamento) : p, 0) / 14))));
 
-        const res = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=5m&range=1d`);
-        if (!res.ok) continue;
-        
-        const json = await res.json();
-        const resultadoYahoo = json.chart?.result?.[0];
-        if (!resultadoYahoo) continue;
-
-        const timestamps = resultadoYahoo.timestamp || [];
-        const quote = resultadoYahoo.indicators?.quote?.[0];
-        if (!quote || timestamps.length === 0) continue;
-
-        const blocoVelas = [];
-        for (let i = 0; i < timestamps.length; i++) {
-          if (quote.open[i] != null && quote.close[i] != null) {
-            blocoVelas.push({ abertura: quote.open[i], maxima: quote.high[i], minima: quote.low[i], fechamento: quote.close[i] });
-          }
-        }
-
-        const validas = blocoVelas.slice(-20);
-        if (validas.length < 15) continue;
-
-        const rsiAtual = calcularRSI(validas, 14);
-        let preSinal = 'NEUTRO';
-        if (rsiAtual >= 75) preSinal = 'VENDA'; else if (rsiAtual <= 25) preSinal = 'COMPRA';
-
-        if (preSinal === 'NEUTRO') continue;
-
-        const prompt = `Ativo ${ativo}. RSI ${rsiAtual.toFixed(2)}. Gatilho ${preSinal}.
-        Últimas 20 velas M5: ${JSON.stringify(validas)}.
-        Qual o tamanho de fractal recente valida esse sinal para a próx vela? Responda estrito JSON: {"sinal": "COMPRA"|"VENDA"|"NEUTRO", "confianca_padrao": "XX%", "motivo_fractal": "..."} - SÓ SINAL SE CONFIANÇA >= 85%.`;
-
-        const result = await genAI.getGenerativeModel({ model: nomeDoModelo }).generateContent(prompt);
-        const textResponse = result.response.text();
-        const iaData = JSON.parse(textResponse.replace(/```json/g, '').replace(/```/g, '').trim());
-        
-        if (iaData.sinal === preSinal && parseInt(iaData.confianca_padrao) >= 85) {
-          await enviarSinalTelegram(ativo, iaData, validas[validas.length - 1].fechamento, rsiAtual);
-        }
-      } catch (e) { console.error(e); }
-    }
-
-    return NextResponse.json({ success: true, message: "Varredura Concluída" });
-
-  } catch (error) {
-    return NextResponse.json({ error: 'Erro interno no servidor' }, { status: 500 });
+      if (rsi >= 75 || rsi <= 25) {
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+        const resIA = await model.generateContent(`Ativo ${ativo}. RSI ${rsi.toFixed(2)}. Analise M5. JSON: {"sinal": "COMPRA"|"VENDA", "confianca_padrao": "XX%"}`);
+        const ia = JSON.parse(resIA.response.text().replace(/```json/g, '').replace(/```/g, ''));
+        if (parseInt(ia.confianca_padrao) >= 85) await enviarSinalTelegram(ativo, ia, velas[velas.length-1].fechamento, rsi);
+      }
+    } catch (e) { console.error(`Erro em ${ativo}:`, e); }
   }
+
+  return NextResponse.json({ 
+    success: true, 
+    mensagem: "Varredura Concluída", 
+    ativos_analisados: analisados 
+  });
 }
