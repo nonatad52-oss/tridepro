@@ -46,30 +46,52 @@ export async function GET(request: Request) {
   if (searchParams.get('key') !== CRON_SECRET) return NextResponse.json({ error: 'Não autorizado' }, { status: 401 });
 
   const { data: ativosDB } = await supabase.from('ativos_global').select('ticker').eq('status', 'ativo');
-  if (!ativosDB) return NextResponse.json({ error: "Erro ao buscar ativos" });
+  if (!ativosDB) return NextResponse.json({ error: "Erro ao buscar ativos no banco de dados" });
 
   const ativos = ativosDB.map(a => a.ticker);
   const analisados: string[] = [];
 
   for (const ativo of ativos) {
     console.log(`📡 Analisando o ativo: ${ativo}...`);
-    analisados.push(ativo);
+    
     try {
       const res = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=5m&range=1d`);
+      if (!res.ok) continue;
+
       const json = await res.json();
       const quote = json.chart?.result?.[0]?.indicators?.quote?.[0];
-      if (!quote) continue;
+      
+      // TRAVA DE SEGURANÇA: Só continua se o Yahoo enviou dados válidos
+      if (!quote || !quote.close || !Array.isArray(quote.close)) {
+        console.log(`⚠️ Yahoo Finance não enviou dados completos para ${ativo}. Pulando...`);
+        continue; 
+      }
 
-      const velas = quote.open.map((o: any, i: number) => ({ fechamento: quote.close[i] })).slice(-20);
-      const rsi = 100 - (100 / (1 + (velas.slice(-14).reduce((g: number, v: any, i: number, arr: any[]) => i > 0 && v.fechamento > arr[i-1].fechamento ? g + (v.fechamento - arr[i-1].fechamento) : g, 0) / 14 / (velas.slice(-14).reduce((p: number, v: any, i: number, arr: any[]) => i > 0 && v.fechamento < arr[i-1].fechamento ? p + (arr[i-1].fechamento - v.fechamento) : p, 0) / 14))));
+      // Extrai apenas as velas que tem fechamento válido
+      const blocoVelas = [];
+      for (let i = 0; i < quote.close.length; i++) {
+        if (quote.close[i] != null) {
+          blocoVelas.push({ fechamento: quote.close[i] });
+        }
+      }
+
+      if (blocoVelas.length < 15) continue;
+      const velas = blocoVelas.slice(-20);
+      analisados.push(ativo); // Só marca como analisado se passou do filtro de segurança
+
+      const rsi = 100 - (100 / (1 + (velas.slice(-14).reduce((g: number, v: any, i: number, arr: any[]) => i > 0 && v.fechamento > arr[i-1].fechamento ? g + (v.fechamento - arr[i-1].fechamento) : g, 0) / 14 / (velas.slice(-14).reduce((p: number, v: any, i: number, arr: any[]) => i > 0 && v.fechamento < arr[i-1].fechamento ? p + (arr[i-1].fechamento - v.fechamento) : p, 0) / 14 || 1)))); // || 1 evita divisão por zero
 
       if (rsi >= 75 || rsi <= 25) {
         const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
         const resIA = await model.generateContent(`Ativo ${ativo}. RSI ${rsi.toFixed(2)}. Analise M5. JSON: {"sinal": "COMPRA"|"VENDA", "confianca_padrao": "XX%"}`);
-        const ia = JSON.parse(resIA.response.text().replace(/```json/g, '').replace(/```/g, ''));
+        const textResponse = resIA.response.text();
+        const ia = JSON.parse(textResponse.replace(/```json/g, '').replace(/```/g, '').trim());
+        
         if (parseInt(ia.confianca_padrao) >= 85) await enviarSinalTelegram(ativo, ia, velas[velas.length-1].fechamento, rsi);
       }
-    } catch (e) { console.error(`Erro em ${ativo}:`, e); }
+    } catch (e) { 
+      console.log(`❌ Erro silencioso em ${ativo} pulando para o próximo.`); 
+    }
   }
 
   return NextResponse.json({ 
