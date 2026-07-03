@@ -33,7 +33,8 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
 
   if (!insertData) return;
 
-  const mensagem = `🎯 *SINAL (M5)* 🎯\n*Ativo:* ${ativoFormatado}\n*Ação:* ${iaData.sinal === 'COMPRA' ? '🟢 COMPRA' : '🔴 VENDA'}\n⏰ *Entrada:* ${formatadorHora.format(proximaVela)}\n⏳ *Expiração:* ${formatadorHora.format(expiracao)}\n📊 RSI: ${rsi.toFixed(2)}\n🧠 Confiança IA: ${iaData.confianca_padrao}`;
+  const tipoAtivo = ativo.endsWith('-USD') ? '🪙 CRIPTO' : '💱 FOREX/AÇÕES';
+  const mensagem = `🎯 *SINAL (M5) | ${tipoAtivo}* 🎯\n*Ativo:* ${ativoFormatado}\n*Ação:* ${iaData.sinal === 'COMPRA' ? '🟢 COMPRA' : '🔴 VENDA'}\n⏰ *Entrada:* ${formatadorHora.format(proximaVela)}\n⏳ *Expiração:* ${formatadorHora.format(expiracao)}\n📊 RSI: ${rsi.toFixed(2)}\n🧠 Confiança IA: ${iaData.confianca_padrao}`;
   
   await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -81,7 +82,12 @@ export async function GET(request: Request) {
 
       const rsi = 100 - (100 / (1 + (velas.slice(-14).reduce((g: number, v: any, i: number, arr: any[]) => i > 0 && v.fechamento > arr[i-1].fechamento ? g + (v.fechamento - arr[i-1].fechamento) : g, 0) / 14 / (velas.slice(-14).reduce((p: number, v: any, i: number, arr: any[]) => i > 0 && v.fechamento < arr[i-1].fechamento ? p + (arr[i-1].fechamento - v.fechamento) : p, 0) / 14 || 1)))); 
 
-      if (rsi >= 70 || rsi <= 30) {
+      // LÓGICA DINÂMICA DE RSI: Criptomoedas ganham mais espaço (65/35). Forex continua conservador (70/30).
+      const isCrypto = ativo.endsWith('-USD');
+      const limiteVenda = isCrypto ? 65 : 70;
+      const limiteCompra = isCrypto ? 35 : 30;
+
+      if (rsi >= limiteVenda || rsi <= limiteCompra) {
         
         // Memória de Aprendizado do Supabase
         const { data: historico } = await supabase
@@ -97,28 +103,33 @@ export async function GET(request: Request) {
           diarioDeAprendizado = historico.map((h, i) => `[Anterior ${i+1}]: Sinal de ${h.sinal} -> Resultado: ${h.resultado}`).join('\n');
         }
         
-        // Prompt Avançado enviando a anatomia completa do candle para a nova IA estável
+        const contextoMercado = isCrypto 
+          ? `ALERTA DE ATIVO: Este é um ativo CRIPTOMOEDA de ALTA VOLATILIDADE. Criptos tendem a formar tendências fortes (efeito manada). Exija pavios de rejeição CLAROS antes de confirmar uma reversão, pois o RSI pode permanecer esticado por muito tempo.` 
+          : `ALERTA DE ATIVO: Este é um ativo TRADICIONAL (Forex/Ações). O mercado tende a respeitar zonas de sobrecompra/sobrevenda com maior precisão e reverter a média.`;
+
+        // Prompt Avançado 
         const prompt = `Você é uma Inteligência Artificial Master Trader especializada em Price Action avançado e análise de Momentum no tempo gráfico M5 para o ativo ${ativo}.
+
+        ${contextoMercado}
 
         DADOS ANATOMIA DOS CANDLES (Últimas 20 velas em ordem cronológica contendo Abertura, Máxima, Mínima e Fechamento):
         ${JSON.stringify(velas)}
 
         ESTADO DE MOMENTUM ATUAL:
-        - RSI (14) Atual: ${rsi.toFixed(2)}
+        - RSI (14) Atual: ${rsi.toFixed(2)} (Filtro aplicado: Compra abaixo de ${limiteCompra}, Venda acima de ${limiteVenda})
         
-        SEU DIÁRIO DE APRENDIZADO RECENTE (Evite repetir erros anteriores se houver uma tendência forte):
+        SEU DIÁRIO DE APRENDIZADO RECENTE:
         ${diarioDeAprendizado}
         
         SUA MISSÃO ANALÍTICA:
-        1. Avalie o Price Action puro analisando o tamanho do corpo dos candles e, principalmente, os pavios (sombras) de rejeição nas regiões críticas indicadas pelo RSI.
-        2. Identifique a presença de padrões de candles altamente preditivos (ex: Martelos, Estrelas Cadentes, Engolfos, Dojis de Rejeição) que confirmem o esgotamento do movimento atual.
-        3. Cruze a estrutura gráfica com seu Diário de Aprendizado para calibrar sua taxa de acerto. Se o mercado estiver rompendo consistentemente seus setups passados, seja conservador.
+        1. Avalie o Price Action puro: tamanho dos corpos e as sombras (pavios) de rejeição.
+        2. Identifique padrões de exaustão (ex: Martelos, Estrelas Cadentes, Engolfos, Dojis). Se não houver rejeição clara no último ou penúltimo candle, a tendência pode continuar (sinal NEUTRO).
+        3. Cruze a estrutura gráfica com seu Diário de Aprendizado.
 
         Decida se a próxima vela de 5 minutos reverterá ou continuará o movimento. 
         Responda ESTRITAMENTE no formato JSON válido: 
         {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%"}`;
 
-        // CORREÇÃO AQUI: Mudança para o modelo estável atualizado
         const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
         const resIA = await model.generateContent(prompt);
         const textResponse = resIA.response.text();
@@ -135,7 +146,7 @@ export async function GET(request: Request) {
 
   return NextResponse.json({ 
     success: true, 
-    mensagem: "Varredura Concluída com Loop de Aprendizado Ativo e IA Atualizada", 
+    mensagem: "Varredura Concluída com Loop de Aprendizado e Otimização para Criptomoedas ativada.", 
     ativos_analisados: analisados 
   });
 }
