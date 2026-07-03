@@ -33,7 +33,7 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
 
   if (!insertData) return;
 
-  const mensagem = `🎯 *SINAL (M5)* 🎯\n*Ativo:* ${ativoFormatado}\n*Ação:* ${iaData.sinal === 'COMPRA' ? '🟢 COMPRA' : '🔴 VENDA'}\n⏰ *Entrada:* ${formatadorHora.format(proximaVela)}\n⏳ *Expiração:* ${formatadorHora.format(expiracao)}\n📊 RSI: ${rsi.toFixed(2)}\n🧠 Confiança IA: ${iaData.confianca_padrao}`;
+  const mensagem = `🚨 *SINAL DE TESTE FORÇADO* 🚨\n*Ativo:* ${ativoFormatado}\n*Ação:* ${iaData.sinal === 'COMPRA' ? '🟢 COMPRA' : '🔴 VENDA'}\n⏰ *Entrada:* ${formatadorHora.format(proximaVela)}\n⏳ *Expiração:* ${formatadorHora.format(expiracao)}\n📊 RSI Real: ${rsi.toFixed(2)}\n🧠 Modo: Teste de Conexão Ativo`;
   
   await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -46,13 +46,13 @@ export async function GET(request: Request) {
   if (searchParams.get('key') !== CRON_SECRET) return NextResponse.json({ error: 'Não autorizado' }, { status: 401 });
 
   const { data: ativosDB } = await supabase.from('ativos_global').select('ticker').eq('status', 'ativo');
-  if (!ativosDB) return NextResponse.json({ error: "Erro ao buscar ativos no banco de dados" });
+  if (!ativosDB) return NextResponse.json({ error: "Erro ao buscar ativos" });
 
   const ativos = ativosDB.map(a => a.ticker);
   const analisados: string[] = [];
 
   for (const ativo of ativos) {
-    console.log(`📡 Analisando o ativo: ${ativo}...`);
+    console.log(`🚨 MODO TESTE - Forçando análise em: ${ativo}...`);
     
     try {
       const res = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=5m&range=1d`);
@@ -63,7 +63,6 @@ export async function GET(request: Request) {
       
       if (!quote || !quote.close || !quote.open || !quote.high || !quote.low) continue; 
 
-      // Montagem da estrutura profissional OHLC (Open, High, Low, Close)
       const blocoVelas = [];
       for (let i = 0; i < quote.close.length; i++) {
         if (quote.close[i] != null && quote.open[i] != null && quote.high[i] != null && quote.low[i] != null) {
@@ -80,63 +79,37 @@ export async function GET(request: Request) {
       const velas = blocoVelas.slice(-20);
       analisados.push(ativo); 
 
-      // Cálculo do RSI baseado em fechamento
       const rsi = 100 - (100 / (1 + (velas.slice(-14).reduce((g: number, v: any, i: number, arr: any[]) => i > 0 && v.fechamento > arr[i-1].fechamento ? g + (v.fechamento - arr[i-1].fechamento) : g, 0) / 14 / (velas.slice(-14).reduce((p: number, v: any, i: number, arr: any[]) => i > 0 && v.fechamento < arr[i-1].fechamento ? p + (arr[i-1].fechamento - v.fechamento) : p, 0) / 14 || 1)))); 
 
-      if (rsi >= 70 || rsi <= 30) {
-        
-        // Memória de Aprendizado do Supabase
-        const { data: historico } = await supabase
-          .from('historico_operacoes')
-          .select('sinal, resultado')
-          .eq('ticker', ativo)
-          .in('resultado', ['WIN', 'LOSS'])
-          .order('id', { ascending: false })
-          .limit(5);
+      // PROMPT DE TESTE: Obriga a IA a ignorar filtros e emitir um sinal imediato
+      const prompt = `Você está participando de um diagnóstico técnico de infraestrutura.
+      A análise real de mercado está pausada. Você DEVE escolher aleatoriamente entre COMPRA ou VENDA baseado estritamente na última vela e retornar confiança de 95%. Não retorne NEUTRO sob circunstância alguma.
+      
+      Ativo: ${ativo}
+      Dados: ${JSON.stringify(velas)}
 
-        let diarioDeAprendizado = "Nenhuma operação finalizada recentemente para este ativo.";
-        if (historico && historico.length > 0) {
-          diarioDeAprendizado = historico.map((h, i) => `[Anterior ${i+1}]: Sinal de ${h.sinal} -> Resultado: ${h.resultado}`).join('\n');
-        }
-        
-        // Prompt Avançado: Leitura Anatômica de Candles (Price Action Avançado)
-        const prompt = `Você é uma Inteligência Artificial Master Trader especializada em Price Action avançado e análise de Momentum no tempo gráfico M5 para o ativo ${ativo}.
+      Responda ESTRITAMENTE neste JSON:
+      {"sinal": "COMPRA" | "VENDA", "confianca_padrao": "95%"}`;
 
-        DADOS ANATOMIA DOS CANDLES (Últimas 20 velas em ordem cronológica contendo Abertura, Máxima, Mínima e Fechamento):
-        ${JSON.stringify(velas)}
-
-        ESTADO DE MOMENTUM ATUAL:
-        - RSI (14) Atual: ${rsi.toFixed(2)}
-        
-        SEU DIÁRIO DE APRENDIZADO RECENTE (Evite repetir erros anteriores se houver uma tendência forte):
-        ${diarioDeAprendizado}
-        
-        SUA MISSÃO ANALÍTICA:
-        1. Avalie o Price Action puro analisando o tamanho do corpo dos candles e, principalmente, os pavios (sombras) de rejeição nas regiões críticas indicadas pelo RSI.
-        2. Identifique a presença de padrões de candles altamente preditivos (ex: Martelos, Estrelas Cadentes, Engolfos, Dojis de Rejeição) que confirmem o esgotamento do movimento atual.
-        3. Cruze a estrutura gráfica com seu Diário de Aprendizado para calibrar sua taxa de acerto. Se o mercado estiver rompendo consistentemente seus setups passados, seja conservador.
-
-        Decida se a próxima vela de 5 minutos reverterá ou continuará o movimento. 
-        Responda ESTRITAMENTE no formato JSON válido: 
-        {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%"}`;
-
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-        const resIA = await model.generateContent(prompt);
-        const textResponse = resIA.response.text();
-        const ia = JSON.parse(textResponse.replace(/```json/g, '').replace(/```/g, '').trim());
-        
-        if ((ia.sinal === 'COMPRA' || ia.sinal === 'VENDA') && parseInt(ia.confianca_padrao) >= 85) {
-          await enviarSinalTelegram(ativo, ia, velas[velas.length-1].fechamento, rsi);
-        }
-      }
+      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+      const resIA = await model.generateContent(prompt);
+      const textResponse = resIA.response.text();
+      const ia = JSON.parse(textResponse.replace(/```json/g, '').replace(/```/g, '').trim());
+      
+      // Envia o sinal ignorando qualquer barreira matemática
+      await enviarSinalTelegram(ativo, ia, velas[velas.length-1].fechamento, rsi);
+      
+      console.log(`✅ TESTE REALIZADO COM SUCESSO PARA O ATIVO ${ativo}. Parando loop.`);
+      break; 
+      
     } catch (e) { 
-      console.log(`❌ Erro em ${ativo}, pulando.`); 
+      console.log(`❌ Erro no teste de ${ativo}, pulando para o próximo.`); 
     }
   }
 
   return NextResponse.json({ 
     success: true, 
-    mensagem: "Varredura Concluída com Loop de Aprendizado Ativo e Anatomia OHLC", 
+    mensagem: "TESTE FORÇADO EXECUTADO. Verifique o Telegram.", 
     ativos_analisados: analisados 
   });
 }
