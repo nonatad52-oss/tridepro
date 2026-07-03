@@ -33,7 +33,7 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
 
   if (!insertData) return;
 
-  const mensagem = `🎯 *SINAL (M5)* 🎯\n*Ativo:* ${ativoFormatado}\n*Ação:* ${iaData.sinal === 'COMPRA' ? '🟢 COMPRA' : '🔴 VENDA'}\n⏰ *Entrada:* ${formatadorHora.format(proximaVela)}\n⏳ *Expiração:* ${formatadorHora.format(expiracao)}\n📊 RSI: ${rsi.toFixed(2)}\n🧠 Confiança: ${iaData.confianca_padrao}`;
+  const mensagem = `🎯 *SINAL (M5)* 🎯\n*Ativo:* ${ativoFormatado}\n*Ação:* ${iaData.sinal === 'COMPRA' ? '🟢 COMPRA' : '🔴 VENDA'}\n⏰ *Entrada:* ${formatadorHora.format(proximaVela)}\n⏳ *Expiração:* ${formatadorHora.format(expiracao)}\n📊 RSI: ${rsi.toFixed(2)}\n🧠 Confiança IA: ${iaData.confianca_padrao}`;
   
   await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -61,42 +61,82 @@ export async function GET(request: Request) {
       const json = await res.json();
       const quote = json.chart?.result?.[0]?.indicators?.quote?.[0];
       
-      // TRAVA DE SEGURANÇA: Só continua se o Yahoo enviou dados válidos
-      if (!quote || !quote.close || !Array.isArray(quote.close)) {
-        console.log(`⚠️ Yahoo Finance não enviou dados completos para ${ativo}. Pulando...`);
-        continue; 
-      }
+      if (!quote || !quote.close || !quote.open || !quote.high || !quote.low) continue; 
 
-      // Extrai apenas as velas que tem fechamento válido
+      // Montagem da estrutura profissional OHLC (Open, High, Low, Close)
       const blocoVelas = [];
       for (let i = 0; i < quote.close.length; i++) {
-        if (quote.close[i] != null) {
-          blocoVelas.push({ fechamento: quote.close[i] });
+        if (quote.close[i] != null && quote.open[i] != null && quote.high[i] != null && quote.low[i] != null) {
+          blocoVelas.push({
+            abertura: quote.open[i],
+            maxima: quote.high[i],
+            minima: quote.low[i],
+            fechamento: quote.close[i]
+          });
         }
       }
 
       if (blocoVelas.length < 15) continue;
       const velas = blocoVelas.slice(-20);
-      analisados.push(ativo); // Só marca como analisado se passou do filtro de segurança
+      analisados.push(ativo); 
 
-      const rsi = 100 - (100 / (1 + (velas.slice(-14).reduce((g: number, v: any, i: number, arr: any[]) => i > 0 && v.fechamento > arr[i-1].fechamento ? g + (v.fechamento - arr[i-1].fechamento) : g, 0) / 14 / (velas.slice(-14).reduce((p: number, v: any, i: number, arr: any[]) => i > 0 && v.fechamento < arr[i-1].fechamento ? p + (arr[i-1].fechamento - v.fechamento) : p, 0) / 14 || 1)))); // || 1 evita divisão por zero
+      // Cálculo do RSI baseado em fechamento
+      const rsi = 100 - (100 / (1 + (velas.slice(-14).reduce((g: number, v: any, i: number, arr: any[]) => i > 0 && v.fechamento > arr[i-1].fechamento ? g + (v.fechamento - arr[i-1].fechamento) : g, 0) / 14 / (velas.slice(-14).reduce((p: number, v: any, i: number, arr: any[]) => i > 0 && v.fechamento < arr[i-1].fechamento ? p + (arr[i-1].fechamento - v.fechamento) : p, 0) / 14 || 1)))); 
 
-      if (rsi >= 75 || rsi <= 25) {
+      if (rsi >= 70 || rsi <= 30) {
+        
+        // Memória de Aprendizado do Supabase
+        const { data: historico } = await supabase
+          .from('historico_operacoes')
+          .select('sinal, resultado')
+          .eq('ticker', ativo)
+          .in('resultado', ['WIN', 'LOSS'])
+          .order('id', { ascending: false })
+          .limit(5);
+
+        let diarioDeAprendizado = "Nenhuma operação finalizada recentemente para este ativo.";
+        if (historico && historico.length > 0) {
+          diarioDeAprendizado = historico.map((h, i) => `[Anterior ${i+1}]: Sinal de ${h.sinal} -> Resultado: ${h.resultado}`).join('\n');
+        }
+        
+        // Prompt Avançado: Leitura Anatômica de Candles (Price Action Avançado)
+        const prompt = `Você é uma Inteligência Artificial Master Trader especializada em Price Action avançado e análise de Momentum no tempo gráfico M5 para o ativo ${ativo}.
+
+        DADOS ANATOMIA DOS CANDLES (Últimas 20 velas em ordem cronológica contendo Abertura, Máxima, Mínima e Fechamento):
+        ${JSON.stringify(velas)}
+
+        ESTADO DE MOMENTUM ATUAL:
+        - RSI (14) Atual: ${rsi.toFixed(2)}
+        
+        SEU DIÁRIO DE APRENDIZADO RECENTE (Evite repetir erros anteriores se houver uma tendência forte):
+        ${diarioDeAprendizado}
+        
+        SUA MISSÃO ANALÍTICA:
+        1. Avalie o Price Action puro analisando o tamanho do corpo dos candles e, principalmente, os pavios (sombras) de rejeição nas regiões críticas indicadas pelo RSI.
+        2. Identifique a presença de padrões de candles altamente preditivos (ex: Martelos, Estrelas Cadentes, Engolfos, Dojis de Rejeição) que confirmem o esgotamento do movimento atual.
+        3. Cruze a estrutura gráfica com seu Diário de Aprendizado para calibrar sua taxa de acerto. Se o mercado estiver rompendo consistentemente seus setups passados, seja conservador.
+
+        Decida se a próxima vela de 5 minutos reverterá ou continuará o movimento. 
+        Responda ESTRITAMENTE no formato JSON válido: 
+        {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%"}`;
+
         const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-        const resIA = await model.generateContent(`Ativo ${ativo}. RSI ${rsi.toFixed(2)}. Analise M5. JSON: {"sinal": "COMPRA"|"VENDA", "confianca_padrao": "XX%"}`);
+        const resIA = await model.generateContent(prompt);
         const textResponse = resIA.response.text();
         const ia = JSON.parse(textResponse.replace(/```json/g, '').replace(/```/g, '').trim());
         
-        if (parseInt(ia.confianca_padrao) >= 85) await enviarSinalTelegram(ativo, ia, velas[velas.length-1].fechamento, rsi);
+        if ((ia.sinal === 'COMPRA' || ia.sinal === 'VENDA') && parseInt(ia.confianca_padrao) >= 85) {
+          await enviarSinalTelegram(ativo, ia, velas[velas.length-1].fechamento, rsi);
+        }
       }
     } catch (e) { 
-      console.log(`❌ Erro silencioso em ${ativo} pulando para o próximo.`); 
+      console.log(`❌ Erro em ${ativo}, pulando.`); 
     }
   }
 
   return NextResponse.json({ 
     success: true, 
-    mensagem: "Varredura Concluída", 
+    mensagem: "Varredura Concluída com Loop de Aprendizado Ativo e Anatomia OHLC", 
     ativos_analisados: analisados 
   });
 }
