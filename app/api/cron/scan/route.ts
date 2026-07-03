@@ -52,6 +52,14 @@ export async function GET(request: Request) {
   const ativos = ativosDB.map(a => a.ticker);
   const analisados: string[] = [];
 
+  // Cálculos para o bloqueio anti-repetição (descobre o horário exato de início da vela atual)
+  const agora = new Date();
+  const inicioVelaAtual = new Date(agora);
+  inicioVelaAtual.setMinutes(agora.getMinutes() - (agora.getMinutes() % 5));
+  inicioVelaAtual.setSeconds(0);
+  inicioVelaAtual.setMilliseconds(0);
+  const inicioVelaISO = inicioVelaAtual.toISOString();
+
   for (const ativo of ativos) {
     console.log(`📡 Analisando o ativo: ${ativo}...`);
     
@@ -82,13 +90,25 @@ export async function GET(request: Request) {
 
       const rsi = 100 - (100 / (1 + (velas.slice(-14).reduce((g: number, v: any, i: number, arr: any[]) => i > 0 && v.fechamento > arr[i-1].fechamento ? g + (v.fechamento - arr[i-1].fechamento) : g, 0) / 14 / (velas.slice(-14).reduce((p: number, v: any, i: number, arr: any[]) => i > 0 && v.fechamento < arr[i-1].fechamento ? p + (arr[i-1].fechamento - v.fechamento) : p, 0) / 14 || 1)))); 
 
-      // LÓGICA DINÂMICA DE RSI: Criptomoedas ganham mais espaço (65/35). Forex continua conservador (70/30).
       const isCrypto = ativo.endsWith('-USD');
       const limiteVenda = isCrypto ? 65 : 70;
       const limiteCompra = isCrypto ? 35 : 30;
 
       if (rsi >= limiteVenda || rsi <= limiteCompra) {
         
+        // 🔒 BLOQUEIO ANTI-REPETIÇÃO: Verifica se já enviou um sinal para ESTA vela específica
+        const { data: sinalJaEnviado } = await supabase
+          .from('historico_operacoes')
+          .select('id')
+          .eq('ticker', ativo)
+          .gte('created_at', inicioVelaISO)
+          .limit(1);
+
+        if (sinalJaEnviado && sinalJaEnviado.length > 0) {
+          console.log(`⏳ Sinal já enviado para ${ativo} nesta vela M5. Aguardando o fechamento...`);
+          continue; // Pula a IA e vai para a próxima moeda, economizando recursos.
+        }
+
         // Memória de Aprendizado do Supabase
         const { data: historico } = await supabase
           .from('historico_operacoes')
@@ -107,7 +127,6 @@ export async function GET(request: Request) {
           ? `ALERTA DE ATIVO: Este é um ativo CRIPTOMOEDA de ALTA VOLATILIDADE. Criptos tendem a formar tendências fortes (efeito manada). Exija pavios de rejeição CLAROS antes de confirmar uma reversão, pois o RSI pode permanecer esticado por muito tempo.` 
           : `ALERTA DE ATIVO: Este é um ativo TRADICIONAL (Forex/Ações). O mercado tende a respeitar zonas de sobrecompra/sobrevenda com maior precisão e reverter a média.`;
 
-        // Prompt Avançado 
         const prompt = `Você é uma Inteligência Artificial Master Trader especializada em Price Action avançado e análise de Momentum no tempo gráfico M5 para o ativo ${ativo}.
 
         ${contextoMercado}
@@ -146,7 +165,7 @@ export async function GET(request: Request) {
 
   return NextResponse.json({ 
     success: true, 
-    mensagem: "Varredura Concluída com Loop de Aprendizado e Otimização para Criptomoedas ativada.", 
+    mensagem: "Varredura Concluída. Filtro Anti-Spam (1 alerta por vela M5) ativado.", 
     ativos_analisados: analisados 
   });
 }
