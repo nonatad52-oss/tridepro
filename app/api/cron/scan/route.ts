@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
-import { GoogleGenerativeAI } from '@google/generative-ai';
 
 export const maxDuration = 60; 
 export const dynamic = 'force-dynamic';
@@ -9,11 +8,12 @@ const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABAS
 const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || 'chave-temporaria';
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || 'token-temporario';
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || 'id-temporario';
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'chave-temporaria';
+
+// 🔄 Configurado para usar a chave exclusiva do robô
+const GROQ_BOT_KEY = process.env.GROQ_BOT_KEY || 'chave-temporaria'; 
 const CRON_SECRET = process.env.CRON_SECRET || '17a85b09'; 
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
 async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: number, rsi: number) {
   let ativoFormatado = ativo.endsWith('=X') ? ativo.substring(0, 3) + '/' + ativo.substring(3, 6) : ativo.replace('-', '/');
@@ -60,7 +60,7 @@ export async function GET(request: Request) {
   const inicioVelaISO = inicioVelaAtual.toISOString();
 
   let analisesFeitas = 0;
-  const MAX_ANALISES_POR_MINUTO = 3; 
+  const MAX_ANALISES_POR_MINUTO = 5; 
 
   for (const ativo of ativos) {
     
@@ -92,19 +92,18 @@ export async function GET(request: Request) {
 
       if (rsi >= limiteVenda || rsi <= limiteCompra) {
         
-        // 🛡️ FILTRO ANTI-GLITCH: Se o RSI for absurdamente extremo (0.5 para baixo ou 99.5 para cima),
-        // significa que o preço travou no Yahoo Finance. Ignoramos para poupar a cota da IA.
+        // 🛡️ Filtro Anti-Glitch (ignora travamentos no preço do Yahoo)
         if (rsi <= 0.5 || rsi >= 99.5) {
           console.log(`⚠️ Glitch detectado em ${ativo} (RSI: ${rsi.toFixed(2)} - Sem variação real). Pulando...`);
           continue;
         }
 
         if (analisesFeitas >= MAX_ANALISES_POR_MINUTO) {
-          console.log(`⚠️ Limite de segurança atingido (${MAX_ANALISES_POR_MINUTO}/${MAX_ANALISES_POR_MINUTO}). Pulando ${ativo} para evitar bloqueio do Google.`);
+          console.log(`⚠️ Limite de segurança por minuto atingido (${MAX_ANALISES_POR_MINUTO}/${MAX_ANALISES_POR_MINUTO}). Pulando ${ativo}.`);
           continue; 
         }
 
-        console.log(`\n🚨 ALERTA RSI VALIDO: ${ativo} (${rsi.toFixed(2)}). Iniciando IA...`);
+        console.log(`\n🚨 ALERTA RSI VÁLIDO: ${ativo} (${rsi.toFixed(2)}). Iniciando IA na Groq...`);
         
         const { data: sinalJaEnviado } = await supabase
           .from('historico_operacoes')
@@ -148,26 +147,45 @@ export async function GET(request: Request) {
         SEU DIÁRIO DE APRENDIZADO RECENTE:
         ${diarioDeAprendizado}
         
-        Decida se a próxima vela de 5 minutos reverterá ou continuará o movimento analisando o price action e padrões de exaustão. 
-        Responda ESTRITAMENTE no formato JSON válido: 
+        Decida se a próxima vela de 5 minutes reverterá ou continuará o movimento analisando o price action e padrões de exaustão. 
+        Responda ESTRITAMENTE no formato JSON válido, sem textos explicativos antes ou depois: 
         {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%"}`;
 
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        await new Promise(resolve => setTimeout(resolve, 300));
 
-        const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-        const resIA = await model.generateContent(prompt);
+        // 🧠 Chamada HTTP com a chave GROQ_BOT_KEY
+        const responseGroq = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${GROQ_BOT_KEY}`, // Utilizando a chave nova aqui
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            model: 'llama-3.3-70b-versatile', 
+            messages: [{ role: 'user', content: prompt }],
+            response_format: { type: 'json_object' }, 
+            temperature: 0.2
+          })
+        });
+
+        if (!responseGroq.ok) {
+          const erroTexto = await responseGroq.text();
+          throw new Error(`Erro na API da Groq: ${responseGroq.status} - ${erroTexto}`);
+        }
+
+        const dadosGroq = await responseGroq.json();
+        const textoResposta = dadosGroq.choices[0].message.content;
+        
+        const ia = JSON.parse(textoResposta.trim());
         analisesFeitas++; 
         
-        const textResponse = resIA.response.text();
-        const ia = JSON.parse(textResponse.replace(/```json/g, '').replace(/```/g, '').trim());
-        
-        console.log(`🧠 [ESPIÃO] Decisão IA para ${ativo} -> SINAL: ${ia.sinal} | CONFIANÇA: ${ia.confianca_padrao}`);
+        console.log(`🧠 [ESPIÃO GROQ] Decisão para ${ativo} -> SINAL: ${ia.sinal} | CONFIANÇA: ${ia.confianca_padrao}`);
 
         if ((ia.sinal === 'COMPRA' || ia.sinal === 'VENDA') && parseInt(ia.confianca_padrao) >= 85) {
           console.log(`✅ SINAL APROVADO! Enviando ${ativo} para o Telegram...`);
           await enviarSinalTelegram(ativo, ia, velas[velas.length-1].fechamento, rsi);
         } else {
-          console.log(`❌ SINAL REJEITADO pela IA.`);
+          console.log(`❌ SINAL REJEITADO pela IA da Groq.`);
         }
       }
     } catch (e: any) { 
@@ -177,7 +195,7 @@ export async function GET(request: Request) {
 
   return NextResponse.json({ 
     success: true, 
-    mensagem: `Varredura executada. Total de requisições enviadas ao Google: ${analisesFeitas}`, 
+    mensagem: `Varredura executada via Groq. Total de requisições de IA feitas: ${analisesFeitas}`, 
     ativos_analisados: analisados 
   });
 }
