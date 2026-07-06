@@ -95,8 +95,8 @@ export async function GET(request: Request) {
         
         // Verifica se estourou o limite do Google
         if (analisesFeitas >= MAX_ANALISES_POR_MINUTO) {
-          console.log(`⚠️ Limite de segurança atingido (3/3). Pulando ${ativo} para evitar bloqueio 429 do Google.`);
-          continue; // Pula para a próxima moeda (que será ignorada também)
+          console.log(`⚠️ Limite de segurança atingido (${MAX_ANALISES_POR_MINUTO}/${MAX_ANALISES_POR_MINUTO}). Pulando ${ativo} para evitar bloqueio 429 do Google.`);
+          continue; // Pula para a próxima moeda
         }
 
         console.log(`\n🚨 ALERTA RSI: ${ativo} (${rsi.toFixed(2)}). Iniciando IA...`);
@@ -147,7 +147,7 @@ export async function GET(request: Request) {
         Responda ESTRITAMENTE no formato JSON válido: 
         {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%"}`;
 
-        // ⏱️ Dáça de 2 segundos para o Google "respirar"
+        // ⏱️ Dá uma pausa de 2 segundos para o Google "respirar"
         await new Promise(resolve => setTimeout(resolve, 2000));
 
         const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
@@ -166,8 +166,9 @@ export async function GET(request: Request) {
           console.log(`❌ SINAL REJEITADO pela IA.`);
         }
       }
-    } catch (e) { 
-      console.log(`❌ Erro técnico em ${ativo}. (Possível 429 ou Yahoo falhou). Pulando...`); 
+    } catch (e: any) { 
+      // 👇 AQUI ESTÁ A ALTERAÇÃO QUE VAI NOS MOSTRAR O ERRO REAL
+      console.log(`❌ Erro técnico em ${ativo}. Detalhes reais do erro:`, e?.message || e); 
     }
   }
 
