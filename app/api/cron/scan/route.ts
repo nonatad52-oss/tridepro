@@ -59,7 +59,6 @@ export async function GET(request: Request) {
   inicioVelaAtual.setMilliseconds(0);
   const inicioVelaISO = inicioVelaAtual.toISOString();
 
-  // 🚦 CONTROLE DE TRÁFEGO PARA NÃO BLOQUEAR A API DO GOOGLE
   let analisesFeitas = 0;
   const MAX_ANALISES_POR_MINUTO = 3; 
 
@@ -93,13 +92,19 @@ export async function GET(request: Request) {
 
       if (rsi >= limiteVenda || rsi <= limiteCompra) {
         
-        // Verifica se estourou o limite do Google
-        if (analisesFeitas >= MAX_ANALISES_POR_MINUTO) {
-          console.log(`⚠️ Limite de segurança atingido (${MAX_ANALISES_POR_MINUTO}/${MAX_ANALISES_POR_MINUTO}). Pulando ${ativo} para evitar bloqueio 429 do Google.`);
-          continue; // Pula para a próxima moeda
+        // 🛡️ FILTRO ANTI-GLITCH: Se o RSI for absurdamente extremo (0.5 para baixo ou 99.5 para cima),
+        // significa que o preço travou no Yahoo Finance. Ignoramos para poupar a cota da IA.
+        if (rsi <= 0.5 || rsi >= 99.5) {
+          console.log(`⚠️ Glitch detectado em ${ativo} (RSI: ${rsi.toFixed(2)} - Sem variação real). Pulando...`);
+          continue;
         }
 
-        console.log(`\n🚨 ALERTA RSI: ${ativo} (${rsi.toFixed(2)}). Iniciando IA...`);
+        if (analisesFeitas >= MAX_ANALISES_POR_MINUTO) {
+          console.log(`⚠️ Limite de segurança atingido (${MAX_ANALISES_POR_MINUTO}/${MAX_ANALISES_POR_MINUTO}). Pulando ${ativo} para evitar bloqueio do Google.`);
+          continue; 
+        }
+
+        console.log(`\n🚨 ALERTA RSI VALIDO: ${ativo} (${rsi.toFixed(2)}). Iniciando IA...`);
         
         const { data: sinalJaEnviado } = await supabase
           .from('historico_operacoes')
@@ -147,12 +152,11 @@ export async function GET(request: Request) {
         Responda ESTRITAMENTE no formato JSON válido: 
         {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%"}`;
 
-        // ⏱️ Dá uma pausa de 2 segundos para o Google "respirar"
         await new Promise(resolve => setTimeout(resolve, 2000));
 
         const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
         const resIA = await model.generateContent(prompt);
-        analisesFeitas++; // Conta que usou uma cota da IA
+        analisesFeitas++; 
         
         const textResponse = resIA.response.text();
         const ia = JSON.parse(textResponse.replace(/```json/g, '').replace(/```/g, '').trim());
@@ -167,7 +171,6 @@ export async function GET(request: Request) {
         }
       }
     } catch (e: any) { 
-      // 👇 AQUI ESTÁ A ALTERAÇÃO QUE VAI NOS MOSTRAR O ERRO REAL
       console.log(`❌ Erro técnico em ${ativo}. Detalhes reais do erro:`, e?.message || e); 
     }
   }
