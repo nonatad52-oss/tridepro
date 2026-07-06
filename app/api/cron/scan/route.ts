@@ -52,13 +52,16 @@ export async function GET(request: Request) {
   const ativos = ativosDB.map(a => a.ticker);
   const analisados: string[] = [];
 
-  // Cálculos para o bloqueio anti-repetição
   const agora = new Date();
   const inicioVelaAtual = new Date(agora);
   inicioVelaAtual.setMinutes(agora.getMinutes() - (agora.getMinutes() % 5));
   inicioVelaAtual.setSeconds(0);
   inicioVelaAtual.setMilliseconds(0);
   const inicioVelaISO = inicioVelaAtual.toISOString();
+
+  // 🚦 CONTROLE DE TRÁFEGO PARA NÃO BLOQUEAR A API DO GOOGLE
+  let analisesFeitas = 0;
+  const MAX_ANALISES_POR_MINUTO = 3; 
 
   for (const ativo of ativos) {
     
@@ -74,12 +77,7 @@ export async function GET(request: Request) {
       const blocoVelas = [];
       for (let i = 0; i < quote.close.length; i++) {
         if (quote.close[i] != null && quote.open[i] != null && quote.high[i] != null && quote.low[i] != null) {
-          blocoVelas.push({
-            abertura: quote.open[i],
-            maxima: quote.high[i],
-            minima: quote.low[i],
-            fechamento: quote.close[i]
-          });
+          blocoVelas.push({ abertura: quote.open[i], maxima: quote.high[i], minima: quote.low[i], fechamento: quote.close[i] });
         }
       }
 
@@ -94,9 +92,15 @@ export async function GET(request: Request) {
       const limiteCompra = isCrypto ? 35 : 30;
 
       if (rsi >= limiteVenda || rsi <= limiteCompra) {
-        console.log(`\n🚨 ALERTA RSI ESTOURADO: ${ativo} (RSI: ${rsi.toFixed(2)}). Iniciando análise IA...`);
         
-        // 🔒 BLOQUEIO ANTI-REPETIÇÃO
+        // Verifica se estourou o limite do Google
+        if (analisesFeitas >= MAX_ANALISES_POR_MINUTO) {
+          console.log(`⚠️ Limite de segurança atingido (3/3). Pulando ${ativo} para evitar bloqueio 429 do Google.`);
+          continue; // Pula para a próxima moeda (que será ignorada também)
+        }
+
+        console.log(`\n🚨 ALERTA RSI: ${ativo} (${rsi.toFixed(2)}). Iniciando IA...`);
+        
         const { data: sinalJaEnviado } = await supabase
           .from('historico_operacoes')
           .select('id')
@@ -105,11 +109,10 @@ export async function GET(request: Request) {
           .limit(1);
 
         if (sinalJaEnviado && sinalJaEnviado.length > 0) {
-          console.log(`⏳ IA pulada: Sinal já enviado para ${ativo} nesta vela M5.`);
+          console.log(`⏳ IA pulada: Sinal já enviado para ${ativo} nesta vela.`);
           continue; 
         }
 
-        // Memória de Aprendizado do Supabase
         const { data: historico } = await supabase
           .from('historico_operacoes')
           .select('sinal, resultado')
@@ -144,29 +147,33 @@ export async function GET(request: Request) {
         Responda ESTRITAMENTE no formato JSON válido: 
         {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%"}`;
 
+        // ⏱️ Dáça de 2 segundos para o Google "respirar"
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
         const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
         const resIA = await model.generateContent(prompt);
+        analisesFeitas++; // Conta que usou uma cota da IA
+        
         const textResponse = resIA.response.text();
         const ia = JSON.parse(textResponse.replace(/```json/g, '').replace(/```/g, '').trim());
         
-        // 👁️ MODO ESPIÃO ATIVADO AQUI
         console.log(`🧠 [ESPIÃO] Decisão IA para ${ativo} -> SINAL: ${ia.sinal} | CONFIANÇA: ${ia.confianca_padrao}`);
 
         if ((ia.sinal === 'COMPRA' || ia.sinal === 'VENDA') && parseInt(ia.confianca_padrao) >= 85) {
           console.log(`✅ SINAL APROVADO! Enviando ${ativo} para o Telegram...`);
           await enviarSinalTelegram(ativo, ia, velas[velas.length-1].fechamento, rsi);
         } else {
-          console.log(`❌ SINAL REJEITADO. Motivo: Confiança baixa ou sinal neutro.`);
+          console.log(`❌ SINAL REJEITADO pela IA.`);
         }
       }
     } catch (e) { 
-      console.log(`❌ Erro técnico em ${ativo}. Detalhes: ${e}`); 
+      console.log(`❌ Erro técnico em ${ativo}. (Possível 429 ou Yahoo falhou). Pulando...`); 
     }
   }
 
   return NextResponse.json({ 
     success: true, 
-    mensagem: "Varredura executada. Verifique os Logs da Vercel para ler as decisões da IA.", 
+    mensagem: `Varredura executada. Total de requisições enviadas ao Google: ${analisesFeitas}`, 
     ativos_analisados: analisados 
   });
 }
