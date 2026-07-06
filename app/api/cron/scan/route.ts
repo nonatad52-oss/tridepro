@@ -52,7 +52,7 @@ export async function GET(request: Request) {
   const ativos = ativosDB.map(a => a.ticker);
   const analisados: string[] = [];
 
-  // Cálculos para o bloqueio anti-repetição (descobre o horário exato de início da vela atual)
+  // Cálculos para o bloqueio anti-repetição
   const agora = new Date();
   const inicioVelaAtual = new Date(agora);
   inicioVelaAtual.setMinutes(agora.getMinutes() - (agora.getMinutes() % 5));
@@ -61,7 +61,6 @@ export async function GET(request: Request) {
   const inicioVelaISO = inicioVelaAtual.toISOString();
 
   for (const ativo of ativos) {
-    console.log(`📡 Analisando o ativo: ${ativo}...`);
     
     try {
       const res = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=5m&range=1d`);
@@ -95,8 +94,9 @@ export async function GET(request: Request) {
       const limiteCompra = isCrypto ? 35 : 30;
 
       if (rsi >= limiteVenda || rsi <= limiteCompra) {
+        console.log(`\n🚨 ALERTA RSI ESTOURADO: ${ativo} (RSI: ${rsi.toFixed(2)}). Iniciando análise IA...`);
         
-        // 🔒 BLOQUEIO ANTI-REPETIÇÃO: Verifica se já enviou um sinal para ESTA vela específica
+        // 🔒 BLOQUEIO ANTI-REPETIÇÃO
         const { data: sinalJaEnviado } = await supabase
           .from('historico_operacoes')
           .select('id')
@@ -105,8 +105,8 @@ export async function GET(request: Request) {
           .limit(1);
 
         if (sinalJaEnviado && sinalJaEnviado.length > 0) {
-          console.log(`⏳ Sinal já enviado para ${ativo} nesta vela M5. Aguardando o fechamento...`);
-          continue; // Pula a IA e vai para a próxima moeda, economizando recursos.
+          console.log(`⏳ IA pulada: Sinal já enviado para ${ativo} nesta vela M5.`);
+          continue; 
         }
 
         // Memória de Aprendizado do Supabase
@@ -124,28 +124,23 @@ export async function GET(request: Request) {
         }
         
         const contextoMercado = isCrypto 
-          ? `ALERTA DE ATIVO: Este é um ativo CRIPTOMOEDA de ALTA VOLATILIDADE. Criptos tendem a formar tendências fortes (efeito manada). Exija pavios de rejeição CLAROS antes de confirmar uma reversão, pois o RSI pode permanecer esticado por muito tempo.` 
-          : `ALERTA DE ATIVO: Este é um ativo TRADICIONAL (Forex/Ações). O mercado tende a respeitar zonas de sobrecompra/sobrevenda com maior precisão e reverter a média.`;
+          ? `ALERTA DE ATIVO: Este é um ativo CRIPTOMOEDA de ALTA VOLATILIDADE. Exija pavios de rejeição CLAROS antes de confirmar uma reversão.` 
+          : `ALERTA DE ATIVO: Este é um ativo TRADICIONAL (Forex/Ações). O mercado tende a reverter a média com mais previsibilidade.`;
 
         const prompt = `Você é uma Inteligência Artificial Master Trader especializada em Price Action avançado e análise de Momentum no tempo gráfico M5 para o ativo ${ativo}.
 
         ${contextoMercado}
 
-        DADOS ANATOMIA DOS CANDLES (Últimas 20 velas em ordem cronológica contendo Abertura, Máxima, Mínima e Fechamento):
+        DADOS ANATOMIA DOS CANDLES (Últimas 20 velas):
         ${JSON.stringify(velas)}
 
-        ESTADO DE MOMENTUM ATUAL:
-        - RSI (14) Atual: ${rsi.toFixed(2)} (Filtro aplicado: Compra abaixo de ${limiteCompra}, Venda acima de ${limiteVenda})
+        MOMENTUM ATUAL:
+        - RSI (14): ${rsi.toFixed(2)}
         
         SEU DIÁRIO DE APRENDIZADO RECENTE:
         ${diarioDeAprendizado}
         
-        SUA MISSÃO ANALÍTICA:
-        1. Avalie o Price Action puro: tamanho dos corpos e as sombras (pavios) de rejeição.
-        2. Identifique padrões de exaustão (ex: Martelos, Estrelas Cadentes, Engolfos, Dojis). Se não houver rejeição clara no último ou penúltimo candle, a tendência pode continuar (sinal NEUTRO).
-        3. Cruze a estrutura gráfica com seu Diário de Aprendizado.
-
-        Decida se a próxima vela de 5 minutos reverterá ou continuará o movimento. 
+        Decida se a próxima vela de 5 minutos reverterá ou continuará o movimento analisando o price action e padrões de exaustão. 
         Responda ESTRITAMENTE no formato JSON válido: 
         {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%"}`;
 
@@ -154,18 +149,24 @@ export async function GET(request: Request) {
         const textResponse = resIA.response.text();
         const ia = JSON.parse(textResponse.replace(/```json/g, '').replace(/```/g, '').trim());
         
+        // 👁️ MODO ESPIÃO ATIVADO AQUI
+        console.log(`🧠 [ESPIÃO] Decisão IA para ${ativo} -> SINAL: ${ia.sinal} | CONFIANÇA: ${ia.confianca_padrao}`);
+
         if ((ia.sinal === 'COMPRA' || ia.sinal === 'VENDA') && parseInt(ia.confianca_padrao) >= 85) {
+          console.log(`✅ SINAL APROVADO! Enviando ${ativo} para o Telegram...`);
           await enviarSinalTelegram(ativo, ia, velas[velas.length-1].fechamento, rsi);
+        } else {
+          console.log(`❌ SINAL REJEITADO. Motivo: Confiança baixa ou sinal neutro.`);
         }
       }
     } catch (e) { 
-      console.log(`❌ Erro em ${ativo}, pulando.`); 
+      console.log(`❌ Erro técnico em ${ativo}. Detalhes: ${e}`); 
     }
   }
 
   return NextResponse.json({ 
     success: true, 
-    mensagem: "Varredura Concluída. Filtro Anti-Spam (1 alerta por vela M5) ativado.", 
+    mensagem: "Varredura executada. Verifique os Logs da Vercel para ler as decisões da IA.", 
     ativos_analisados: analisados 
   });
 }
