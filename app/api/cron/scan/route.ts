@@ -60,7 +60,8 @@ export async function GET(request: Request) {
   const inicioVelaISO = inicioVelaAtual.toISOString();
 
   let analisesFeitas = 0;
-  const MAX_ANALISES_POR_MINUTO = 5; 
+
+  // 🚀 A trava de MAX_ANALISES_POR_MINUTO foi completamente removida daqui!
 
   for (const ativo of ativos) {
     
@@ -96,11 +97,6 @@ export async function GET(request: Request) {
         if (rsi <= 0.5 || rsi >= 99.5) {
           console.log(`⚠️ Glitch detectado em ${ativo} (RSI: ${rsi.toFixed(2)} - Sem variação real). Pulando...`);
           continue;
-        }
-
-        if (analisesFeitas >= MAX_ANALISES_POR_MINUTO) {
-          console.log(`⚠️ Limite de segurança por minuto atingido (${MAX_ANALISES_POR_MINUTO}/${MAX_ANALISES_POR_MINUTO}). Pulando ${ativo}.`);
-          continue; 
         }
 
         console.log(`\n🚨 ALERTA RSI VÁLIDO: ${ativo} (${rsi.toFixed(2)}). Iniciando IA na Groq...`);
@@ -151,13 +147,14 @@ export async function GET(request: Request) {
         Responda ESTRITAMENTE no formato JSON válido, sem textos explicativos antes ou depois: 
         {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%"}`;
 
+        // Pausa super leve só para não congestionar a rede da Vercel
         await new Promise(resolve => setTimeout(resolve, 300));
 
         // 🧠 Chamada HTTP com a chave GROQ_BOT_KEY
         const responseGroq = await fetch('https://api.groq.com/openai/v1/chat/completions', {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${GROQ_BOT_KEY}`, // Utilizando a chave nova aqui
+            'Authorization': `Bearer ${GROQ_BOT_KEY}`,
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({
@@ -195,7 +192,7 @@ export async function GET(request: Request) {
 
   return NextResponse.json({ 
     success: true, 
-    mensagem: `Varredura executada via Groq. Total de requisições de IA feitas: ${analisesFeitas}`, 
+    mensagem: `Varredura executada via Groq. Total de requisições de IA feitas (Ilimitado): ${analisesFeitas}`, 
     ativos_analisados: analisados 
   });
 }
