@@ -43,11 +43,22 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
 }
 
 export async function GET(request: Request) {
+  // 🔊 Sinal de vida: Imprime log assim que a URL é chamada
+  console.log("🤖 [CRON] Robô acordou! Iniciando varredura dos ativos...");
+  
   const { searchParams } = new URL(request.url);
-  if (searchParams.get('key') !== CRON_SECRET) return NextResponse.json({ error: 'Não autorizado' }, { status: 401 });
+  if (searchParams.get('key') !== CRON_SECRET) {
+    console.log("❌ [ERRO] Tentativa de acesso bloqueada (Chave de segurança incorreta).");
+    return NextResponse.json({ error: 'Não autorizado' }, { status: 401 });
+  }
 
   const { data: ativosDB } = await supabase.from('ativos_global').select('ticker').eq('status', 'ativo');
-  if (!ativosDB) return NextResponse.json({ error: "Erro ao buscar ativos no banco de dados" });
+  if (!ativosDB) {
+    console.log("❌ [ERRO] Falha ao buscar ativos no Supabase.");
+    return NextResponse.json({ error: "Erro ao buscar ativos no banco de dados" });
+  }
+  
+  console.log(`📊 Total de ativos carregados do banco: ${ativosDB.length}`);
 
   const ativos = ativosDB.map(a => a.ticker);
   const analisados: string[] = [];
@@ -176,7 +187,7 @@ export async function GET(request: Request) {
         
         console.log(`🧠 [ESPIÃO GROQ] Decisão para ${ativo} -> SINAL: ${ia.sinal} | CONFIANÇA: ${ia.confianca_padrao}`);
 
-        // 🎯 Limite reduzido para 75 para capturar mais oportunidades
+        // 🎯 Limite ajustado para 75 para capturar mais oportunidades
         if ((ia.sinal === 'COMPRA' || ia.sinal === 'VENDA') && parseInt(ia.confianca_padrao) >= 75) {
           console.log(`✅ SINAL APROVADO! Enviando ${ativo} para o Telegram...`);
           await enviarSinalTelegram(ativo, ia, velas[velas.length-1].fechamento, rsi);
@@ -189,6 +200,7 @@ export async function GET(request: Request) {
     }
   }
 
+  console.log("✅ [CRON] Varredura finalizada.");
   return NextResponse.json({ 
     success: true, 
     mensagem: `Varredura executada via Groq. Total de requisições de IA feitas (Ilimitado): ${analisesFeitas}`, 
