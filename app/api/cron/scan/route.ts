@@ -61,8 +61,6 @@ export async function GET(request: Request) {
 
   let analisesFeitas = 0;
 
-  // 🚀 A trava de MAX_ANALISES_POR_MINUTO foi completamente removida daqui!
-
   for (const ativo of ativos) {
     
     try {
@@ -178,7 +176,8 @@ export async function GET(request: Request) {
         
         console.log(`🧠 [ESPIÃO GROQ] Decisão para ${ativo} -> SINAL: ${ia.sinal} | CONFIANÇA: ${ia.confianca_padrao}`);
 
-        if ((ia.sinal === 'COMPRA' || ia.sinal === 'VENDA') && parseInt(ia.confianca_padrao) >= 85) {
+        // 🎯 Limite reduzido para 75 para capturar mais oportunidades
+        if ((ia.sinal === 'COMPRA' || ia.sinal === 'VENDA') && parseInt(ia.confianca_padrao) >= 75) {
           console.log(`✅ SINAL APROVADO! Enviando ${ativo} para o Telegram...`);
           await enviarSinalTelegram(ativo, ia, velas[velas.length-1].fechamento, rsi);
         } else {
