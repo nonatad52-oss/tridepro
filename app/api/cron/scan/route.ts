@@ -187,8 +187,8 @@ export async function GET(request: Request) {
         
         console.log(`🧠 [ESPIÃO GROQ] Decisão para ${ativo} -> SINAL: ${ia.sinal} | CONFIANÇA: ${ia.confianca_padrao}`);
 
-        // 🎯 Limite ajustado para 75 para capturar mais oportunidades
-        if ((ia.sinal === 'COMPRA' || ia.sinal === 'VENDA') && parseInt(ia.confianca_padrao) >= 75) {
+        // 🎯 Limite ajustado para 60 para adaptar à forma como a Groq avalia confiança
+        if ((ia.sinal === 'COMPRA' || ia.sinal === 'VENDA') && parseInt(ia.confianca_padrao) >= 60) {
           console.log(`✅ SINAL APROVADO! Enviando ${ativo} para o Telegram...`);
           await enviarSinalTelegram(ativo, ia, velas[velas.length-1].fechamento, rsi);
         } else {
