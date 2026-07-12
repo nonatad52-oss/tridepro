@@ -9,7 +9,6 @@ const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.SU
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || 'token-temporario';
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || 'id-temporario';
 
-// 🔄 Configurado para usar a chave exclusiva do robô
 const GROQ_BOT_KEY = process.env.GROQ_BOT_KEY || 'chave-temporaria'; 
 const CRON_SECRET = process.env.CRON_SECRET || '17a85b09'; 
 
@@ -20,9 +19,13 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
   
   const formatadorHora = new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' });
   const agora = new Date();
+  
+  // ⏰ Calcula a abertura exata da PRÓXIMA vela de 5 minutos
   const proximaVela = new Date(agora);
   proximaVela.setMinutes(agora.getMinutes() + (5 - (agora.getMinutes() % 5)));
   proximaVela.setSeconds(0);
+  proximaVela.setMilliseconds(0);
+  
   const expiracao = new Date(proximaVela);
   expiracao.setMinutes(expiracao.getMinutes() + 5);
 
@@ -34,7 +37,7 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
   if (!insertData) return;
 
   const tipoAtivo = ativo.endsWith('-USD') ? '🪙 CRIPTO' : '💱 FOREX/AÇÕES';
-  const mensagem = `🎯 *SINAL (M5) | ${tipoAtivo}* 🎯\n*Ativo:* ${ativoFormatado}\n*Ação:* ${iaData.sinal === 'COMPRA' ? '🟢 COMPRA' : '🔴 VENDA'}\n⏰ *Entrada:* ${formatadorHora.format(proximaVela)}\n⏳ *Expiração:* ${formatadorHora.format(expiracao)}\n📊 RSI: ${rsi.toFixed(2)}\n🧠 Confiança IA: ${iaData.confianca_padrao}`;
+  const mensagem = `🏆 *SINAL VIP (M5) | ESCOLHA DA IA* 🏆\n*Ativo:* ${ativoFormatado}\n*Ação:* ${iaData.sinal === 'COMPRA' ? '🟢 COMPRA' : '🔴 VENDA'}\n⏰ *Entrada:* ${formatadorHora.format(proximaVela)} (Na virada da vela)\n⏳ *Expiração:* ${formatadorHora.format(expiracao)}\n📊 RSI: ${rsi.toFixed(2)}\n🧠 Confiança IA: ${iaData.confianca_padrao}`;
   
   await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -43,12 +46,13 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
 }
 
 export async function GET(request: Request) {
-  // 🔊 Sinal de vida: Imprime log assim que a URL é chamada
   console.log("🤖 [CRON] Robô acordou! Iniciando varredura dos ativos...");
   
   const { searchParams } = new URL(request.url);
-  if (searchParams.get('key') !== CRON_SECRET) {
-    console.log("❌ [ERRO] Tentativa de acesso bloqueada (Chave de segurança incorreta).");
+  const isManual = searchParams.get('key') === CRON_SECRET;
+
+  if (!isManual) {
+    console.log("❌ [ERRO] Tentativa de acesso bloqueada.");
     return NextResponse.json({ error: 'Não autorizado' }, { status: 401 });
   }
 
@@ -58,10 +62,22 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "Erro ao buscar ativos no banco de dados" });
   }
   
-  console.log(`📊 Total de ativos carregados do banco: ${ativosDB.length}`);
+  let ativos = ativosDB.map(a => a.ticker);
 
-  const ativos = ativosDB.map(a => a.ticker);
+  // 📅 FILTRO DE FIM DE SEMANA (Sábado e Domingo)
+  const horaSP = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
+  const diaDaSemana = horaSP.getDay(); // 0 = Domingo, 6 = Sábado
+  const isFimDeSemana = diaDaSemana === 0 || diaDaSemana === 6;
+
+  if (isFimDeSemana) {
+    console.log("📅 Fim de semana detectado! Mercado tradicional fechado. Analisando APENAS Criptomoedas.");
+    ativos = ativos.filter(ativo => ativo.endsWith('-USD'));
+  }
+
+  console.log(`📊 Total de ativos válidos para agora: ${ativos.length}`);
+
   const analisados: string[] = [];
+  const torneioDeSinais: Array<{ativo: string, sinal: string, confianca: number, precoAtual: number, rsi: number}> = [];
 
   const agora = new Date();
   const inicioVelaAtual = new Date(agora);
@@ -73,7 +89,6 @@ export async function GET(request: Request) {
   let analisesFeitas = 0;
 
   for (const ativo of ativos) {
-    
     try {
       const res = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=5m&range=1d`);
       if (!res.ok) continue;
@@ -101,12 +116,7 @@ export async function GET(request: Request) {
       const limiteCompra = isCrypto ? 35 : 30;
 
       if (rsi >= limiteVenda || rsi <= limiteCompra) {
-        
-        // 🛡️ Filtro Anti-Glitch (ignora travamentos no preço do Yahoo)
-        if (rsi <= 0.5 || rsi >= 99.5) {
-          console.log(`⚠️ Glitch detectado em ${ativo} (RSI: ${rsi.toFixed(2)} - Sem variação real). Pulando...`);
-          continue;
-        }
+        if (rsi <= 0.5 || rsi >= 99.5) continue;
 
         console.log(`\n🚨 ALERTA RSI VÁLIDO: ${ativo} (${rsi.toFixed(2)}). Iniciando IA na Groq...`);
         
@@ -156,10 +166,8 @@ export async function GET(request: Request) {
         Responda ESTRITAMENTE no formato JSON válido, sem textos explicativos antes ou depois: 
         {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%"}`;
 
-        // Pausa super leve só para não congestionar a rede da Vercel
         await new Promise(resolve => setTimeout(resolve, 300));
 
-        // 🧠 Chamada HTTP com a chave GROQ_BOT_KEY
         const responseGroq = await fetch('https://api.groq.com/openai/v1/chat/completions', {
           method: 'POST',
           headers: {
@@ -185,14 +193,18 @@ export async function GET(request: Request) {
         const ia = JSON.parse(textoResposta.trim());
         analisesFeitas++; 
         
-        console.log(`🧠 [ESPIÃO GROQ] Decisão para ${ativo} -> SINAL: ${ia.sinal} | CONFIANÇA: ${ia.confianca_padrao}`);
+        const confiancaNumerica = parseInt(ia.confianca_padrao);
+        console.log(`🧠 [ESPIÃO GROQ] Decisão para ${ativo} -> SINAL: ${ia.sinal} | CONFIANÇA: ${confiancaNumerica}%`);
 
-        // 🎯 Limite ajustado para 60 para adaptar à forma como a Groq avalia confiança
-        if ((ia.sinal === 'COMPRA' || ia.sinal === 'VENDA') && parseInt(ia.confianca_padrao) >= 60) {
-          console.log(`✅ SINAL APROVADO! Enviando ${ativo} para o Telegram...`);
-          await enviarSinalTelegram(ativo, ia, velas[velas.length-1].fechamento, rsi);
-        } else {
-          console.log(`❌ SINAL REJEITADO pela IA da Groq.`);
+        if ((ia.sinal === 'COMPRA' || ia.sinal === 'VENDA') && confiancaNumerica >= 75) {
+          console.log(`📥 Adicionando ${ativo} ao Torneio Vip...`);
+          torneioDeSinais.push({
+            ativo: ativo,
+            sinal: ia.sinal,
+            confianca: confiancaNumerica,
+            precoAtual: velas[velas.length-1].fechamento,
+            rsi: rsi
+          });
         }
       }
     } catch (e: any) { 
@@ -200,10 +212,28 @@ export async function GET(request: Request) {
     }
   }
 
+  if (torneioDeSinais.length > 0) {
+    torneioDeSinais.sort((a, b) => b.confianca - a.confianca);
+    const oMelhor = torneioDeSinais[0];
+    
+    console.log(`\n======================================`);
+    console.log(`🥇 VENCEDOR DA RODADA: ${oMelhor.ativo} com ${oMelhor.confianca}%`);
+    console.log(`======================================\n`);
+
+    await enviarSinalTelegram(
+      oMelhor.ativo, 
+      { sinal: oMelhor.sinal, confianca_padrao: `${oMelhor.confianca}%` }, 
+      oMelhor.precoAtual, 
+      oMelhor.rsi
+    );
+  } else {
+    console.log("😴 Nenhum ativo atingiu a meta de 75% de confiança nesta rodada.");
+  }
+
   console.log("✅ [CRON] Varredura finalizada.");
   return NextResponse.json({ 
     success: true, 
-    mensagem: `Varredura executada via Groq. Total de requisições de IA feitas (Ilimitado): ${analisesFeitas}`, 
+    mensagem: `Sinais de Elite. Varredura executada. Total analisados: ${analisados.length}`, 
     ativos_analisados: analisados 
   });
 }
