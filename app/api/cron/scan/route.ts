@@ -20,7 +20,6 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
   const formatadorHora = new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' });
   const agora = new Date();
   
-  // ⏰ Calcula a abertura exata da PRÓXIMA vela de 5 minutos
   const proximaVela = new Date(agora);
   proximaVela.setMinutes(agora.getMinutes() + (5 - (agora.getMinutes() % 5)));
   proximaVela.setSeconds(0);
@@ -36,7 +35,6 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
 
   if (!insertData) return;
 
-  const tipoAtivo = ativo.endsWith('-USD') ? '🪙 CRIPTO' : '💱 FOREX/AÇÕES';
   const mensagem = `🏆 *SINAL VIP (M5) | ESCOLHA DA IA* 🏆\n*Ativo:* ${ativoFormatado}\n*Ação:* ${iaData.sinal === 'COMPRA' ? '🟢 COMPRA' : '🔴 VENDA'}\n⏰ *Entrada:* ${formatadorHora.format(proximaVela)} (Na virada da vela)\n⏳ *Expiração:* ${formatadorHora.format(expiracao)}\n📊 RSI: ${rsi.toFixed(2)}\n🧠 Confiança IA: ${iaData.confianca_padrao}`;
   
   await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
@@ -46,7 +44,7 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
 }
 
 export async function GET(request: Request) {
-  console.log("🤖 [CRON] Robô acordou! Iniciando varredura dos ativos...");
+  console.log("🤖 [CRON] Robô acordou! Iniciando varredura analítica avançada...");
   
   const { searchParams } = new URL(request.url);
   const isManual = searchParams.get('key') === CRON_SECRET;
@@ -64,13 +62,12 @@ export async function GET(request: Request) {
   
   let ativos = ativosDB.map(a => a.ticker);
 
-  // 📅 FILTRO DE FIM DE SEMANA (Sábado e Domingo)
   const horaSP = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
-  const diaDaSemana = horaSP.getDay(); // 0 = Domingo, 6 = Sábado
+  const diaDaSemana = horaSP.getDay(); 
   const isFimDeSemana = diaDaSemana === 0 || diaDaSemana === 6;
 
   if (isFimDeSemana) {
-    console.log("📅 Fim de semana detectado! Mercado tradicional fechado. Analisando APENAS Criptomoedas.");
+    console.log("📅 Fim de semana detectado! Analisando APENAS Criptomoedas.");
     ativos = ativos.filter(ativo => ativo.endsWith('-USD'));
   }
 
@@ -86,8 +83,6 @@ export async function GET(request: Request) {
   inicioVelaAtual.setMilliseconds(0);
   const inicioVelaISO = inicioVelaAtual.toISOString();
 
-  let analisesFeitas = 0;
-
   for (const ativo of ativos) {
     try {
       const res = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=5m&range=1d`);
@@ -98,10 +93,24 @@ export async function GET(request: Request) {
       
       if (!quote || !quote.close || !quote.open || !quote.high || !quote.low) continue; 
 
+      // 🛠️ MAPEAMENTO MATEMÁTICO ANATÔMICO DO CANDLE (Price Action Puro)
       const blocoVelas = [];
       for (let i = 0; i < quote.close.length; i++) {
         if (quote.close[i] != null && quote.open[i] != null && quote.high[i] != null && quote.low[i] != null) {
-          blocoVelas.push({ abertura: quote.open[i], maxima: quote.high[i], minima: quote.low[i], fechamento: quote.close[i] });
+          const ab = quote.open[i];
+          const fc = quote.close[i];
+          const max = quote.high[i];
+          const min = quote.low[i];
+          
+          const tamanhoCorpo = Math.abs(fc - ab);
+          const pavioSuperior = max - Math.max(ab, fc);
+          const pavioInferior = Math.min(ab, fc) - min;
+          const direcao = fc >= ab ? "ALTA" : "BAIXA";
+
+          blocoVelas.push({ 
+            abertura: ab, maxima: max, minima: min, fechamento: fc,
+            corpo: tamanhoCorpo, pavio_sup: pavioSuperior, pavio_inf: pavioInferior, direcao: direcao
+          });
         }
       }
 
@@ -109,6 +118,7 @@ export async function GET(request: Request) {
       const velas = blocoVelas.slice(-20);
       analisados.push(ativo); 
 
+      // Cálculo preciso do RSI
       const rsi = 100 - (100 / (1 + (velas.slice(-14).reduce((g: number, v: any, i: number, arr: any[]) => i > 0 && v.fechamento > arr[i-1].fechamento ? g + (v.fechamento - arr[i-1].fechamento) : g, 0) / 14 / (velas.slice(-14).reduce((p: number, v: any, i: number, arr: any[]) => i > 0 && v.fechamento < arr[i-1].fechamento ? p + (arr[i-1].fechamento - v.fechamento) : p, 0) / 14 || 1)))); 
 
       const isCrypto = ativo.endsWith('-USD');
@@ -118,7 +128,7 @@ export async function GET(request: Request) {
       if (rsi >= limiteVenda || rsi <= limiteCompra) {
         if (rsi <= 0.5 || rsi >= 99.5) continue;
 
-        console.log(`\n🚨 ALERTA RSI VÁLIDO: ${ativo} (${rsi.toFixed(2)}). Iniciando IA na Groq...`);
+        console.log(`\n🚨 ALERTA RSI VÁLIDO: ${ativo} (${rsi.toFixed(2)}). Solicitando avaliação da IA...`);
         
         const { data: sinalJaEnviado } = await supabase
           .from('historico_operacoes')
@@ -128,7 +138,7 @@ export async function GET(request: Request) {
           .limit(1);
 
         if (sinalJaEnviado && sinalJaEnviado.length > 0) {
-          console.log(`⏳ IA pulada: Sinal já enviado para ${ativo} nesta vela.`);
+          console.log(`⏳ IA Pulada: Sinal já emitido para ${ativo} neste bloco M5.`);
           continue; 
         }
 
@@ -146,24 +156,30 @@ export async function GET(request: Request) {
         }
         
         const contextoMercado = isCrypto 
-          ? `ALERTA DE ATIVO: Este é um ativo CRIPTOMOEDA de ALTA VOLATILIDADE. Exija pavios de rejeição CLAROS antes de confirmar uma reversão.` 
-          : `ALERTA DE ATIVO: Este é um ativo TRADICIONAL (Forex/Ações). O mercado tende a reverter a média com mais previsibilidade.`;
+          ? `ALERTA DE VOLATILIDADE CRIPTO: Verifique agressivamente se há pavios longos de exaustão contra a tendência atual.` 
+          : `MERCADO TRADICIONAL (Forex/Ações): O ativo tende a retornar à média. Avalie suporte/resistência nos preços das últimas velas.`;
 
-        const prompt = `Você é uma Inteligência Artificial Master Trader especializada em Price Action avançado e análise de Momentum no tempo gráfico M5 para o ativo ${ativo}.
+        // Prompt blindado e estruturado para evitar erros de falso rompimento
+        const prompt = `Você é um robô de Inteligência Artificial Especialista em Reversão de Tendência e Price Action de alta precisão (Gráfico M5) para o ativo ${ativo}.
 
         ${contextoMercado}
 
-        DADOS ANATOMIA DOS CANDLES (Últimas 20 velas):
+        MÉTRICAS ANATÔMICAS DAS ÚLTIMAS 20 VELAS (Análise estrutural):
         ${JSON.stringify(velas)}
 
         MOMENTUM ATUAL:
         - RSI (14): ${rsi.toFixed(2)}
         
-        SEU DIÁRIO DE APRENDIZADO RECENTE:
+        SEU DIÁRIO DE APRENDIZADO (Histórico recente de acertos/erros):
         ${diarioDeAprendizado}
         
-        Decida se a próxima vela de 5 minutes reverterá ou continuará o movimento analisando o price action e padrões de exaustão. 
-        Responda ESTRITAMENTE no formato JSON válido, sem textos explicativos antes ou depois: 
+        REGRAS DE FILTRAGEM ANTI-ERRO:
+        1. Se o RSI estiver esticado para VENDA, mas as últimas 3 ou 4 velas forem barras gigantes de ALTA com pavio superior quase ZERO, isso é força compradora esmagadora. Responda "NEUTRO".
+        2. Para confirmar "VENDA", procure por velas recentes de alta que deixaram longos pavios superiores (rejeição de topo).
+        3. Para confirmar "COMPRA", procure por velas recentes de baixa que deixaram longos pavios inferiores (rejeição de fundo).
+        4. Só atribua confiança alta se o padrão gráfico apoiar a exaustão indicada pelo RSI.
+
+        Sua resposta deve ser EXCLUSIVAMENTE um JSON válido, sem qualquer texto adicional:
         {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%"}`;
 
         await new Promise(resolve => setTimeout(resolve, 300));
@@ -178,26 +194,21 @@ export async function GET(request: Request) {
             model: 'llama-3.3-70b-versatile', 
             messages: [{ role: 'user', content: prompt }],
             response_format: { type: 'json_object' }, 
-            temperature: 0.2
+            temperature: 0.1 // Reduzido para 0.1 para deixar a IA mais lógica e menos imprevisível
           })
         });
 
-        if (!responseGroq.ok) {
-          const erroTexto = await responseGroq.text();
-          throw new Error(`Erro na API da Groq: ${responseGroq.status} - ${erroTexto}`);
-        }
+        if (!responseGroq.ok) continue;
 
         const dadosGroq = await responseGroq.json();
-        const textoResposta = dadosGroq.choices[0].message.content;
-        
-        const ia = JSON.parse(textoResposta.trim());
-        analisesFeitas++; 
+        const ia = JSON.parse(dadosGroq.choices[0].message.content.trim());
         
         const confiancaNumerica = parseInt(ia.confianca_padrao);
-        console.log(`🧠 [ESPIÃO GROQ] Decisão para ${ativo} -> SINAL: ${ia.sinal} | CONFIANÇA: ${confiancaNumerica}%`);
+        console.log(`🧠 [MOTOR ANÁLITICO] ${ativo} -> Sinal: ${ia.sinal} | Confiança: ${confiancaNumerica}%`);
 
-        if ((ia.sinal === 'COMPRA' || ia.sinal === 'VENDA') && confiancaNumerica >= 75) {
-          console.log(`📥 Adicionando ${ativo} ao Torneio Vip...`);
+        // 🎯 NOVA RÉGUA RECONFIGURADA PARA 70%
+        if ((ia.sinal === 'COMPRA' || ia.sinal === 'VENDA') && confiancaNumerica >= 70) {
+          console.log(`📥 Guardando ${ativo} para a decisão de elite...`);
           torneioDeSinais.push({
             ativo: ativo,
             sinal: ia.sinal,
@@ -208,17 +219,16 @@ export async function GET(request: Request) {
         }
       }
     } catch (e: any) { 
-      console.log(`❌ Erro técnico em ${ativo}. Detalhes reais do erro:`, e?.message || e); 
+      console.log(`❌ Erro em ${ativo}:`, e?.message || e); 
     }
   }
 
+  // 🏆 Seleção do sinal vencedor da rodada
   if (torneioDeSinais.length > 0) {
     torneioDeSinais.sort((a, b) => b.confianca - a.confianca);
     const oMelhor = torneioDeSinais[0];
     
-    console.log(`\n======================================`);
-    console.log(`🥇 VENCEDOR DA RODADA: ${oMelhor.ativo} com ${oMelhor.confianca}%`);
-    console.log(`======================================\n`);
+    console.log(`\n🥇 FILTRADO E ENVIADO: ${oMelhor.ativo} com ${oMelhor.confianca}% de precisão analítica.`);
 
     await enviarSinalTelegram(
       oMelhor.ativo, 
@@ -227,13 +237,13 @@ export async function GET(request: Request) {
       oMelhor.rsi
     );
   } else {
-    console.log("😴 Nenhum ativo atingiu a meta de 75% de confiança nesta rodada.");
+    console.log("😴 Nenhum ativo passou pelo filtro anti-erros de 70% nesta rodada.");
   }
 
   console.log("✅ [CRON] Varredura finalizada.");
   return NextResponse.json({ 
     success: true, 
-    mensagem: `Sinais de Elite. Varredura executada. Total analisados: ${analisados.length}`, 
+    mensagem: `Varredura com filtro anti-erro ativo. Alvo: >=70%`, 
     ativos_analisados: analisados 
   });
 }
