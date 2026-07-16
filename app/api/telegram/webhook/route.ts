@@ -1,51 +1,71 @@
-import { createClient } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
+import { createClient } from '@supabase/supabase-js';
 
-export async function POST(req: Request) {
+// Inicialização do Supabase
+const getSupabaseClient = () => {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
+  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY;
+  if (!url || !key) throw new Error("Credenciais do Supabase ausentes.");
+  return createClient(url, key);
+};
+
+export async function POST(request: Request) {
   try {
-    const body = await req.json();
+    const body = await request.json();
 
-    // Verifica se a requisição veio de um clique de botão no Telegram
+    // Verifica se o que chegou foi um clique em um botão (callback_query)
     if (body.callback_query) {
       const callbackQuery = body.callback_query;
-      const data = callbackQuery.data; // Exemplo: "res_WIN_15"
+      const data = callbackQuery.data; // Vai ser "WIN_123" ou "LOSS_123"
       const chatId = callbackQuery.message.chat.id;
       const messageId = callbackQuery.message.message_id;
-      const textoOriginal = callbackQuery.message.text;
+      const originalText = callbackQuery.message.text;
 
-      if (data.startsWith('res_')) {
-        const partes = data.split('_');
-        const resultado = partes[1]; // 'WIN' ou 'LOSS'
-        const idOperacao = partes[2];
+      // Separa a ação (WIN/LOSS) do ID da operação no banco
+      const [resultado, idOperacao] = data.split('_');
 
-        // Conecta ao Supabase e atualiza a operação
-        const supabase = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
-        await supabase.from('historico_operacoes').update({ resultado }).eq('id', idOperacao);
+      const supabase = getSupabaseClient();
+      const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
-        // Edita a mensagem no Telegram: remove os botões e carimba o resultado
-        const carimbo = resultado === 'WIN' ? '\n\n🏆 *RESULTADO FINAL: ✅ WIN*' : '\n\n💀 *RESULTADO FINAL: ❌ LOSS*';
-        await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/editMessageText`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            chat_id: chatId,
-            message_id: messageId,
-            text: textoOriginal.replace('👇 *Registre o resultado abaixo:*', '') + carimbo,
-            parse_mode: 'Markdown'
-          })
-        });
-
-        // Informa ao Telegram que o clique foi processado (tira o ícone de relógio do botão)
-        await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ callback_query_id: callbackQuery.id })
-        });
+      // 1. Atualiza o resultado da operação no banco de dados
+      if (idOperacao) {
+        await supabase
+          .from('historico_operacoes')
+          .update({ resultado: resultado })
+          .eq('id', idOperacao);
       }
+
+      // 2. Monta o texto atualizado (Mensagem antiga + Carimbo do resultado)
+      const carimbo = resultado === 'WIN' ? '✅ *VITÓRIA (WIN)*' : '❌ *DERROTA (LOSS)*';
+      const novoTexto = `${originalText}\n\n🎯 *Resultado:* ${carimbo}`;
+
+      // 3. Edita a mensagem no Telegram (Substitui o texto e SOME com os botões)
+      await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/editMessageText`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          message_id: messageId,
+          text: novoTexto,
+          parse_mode: 'Markdown',
+          reply_markup: { inline_keyboard: [] } // Enviar um array vazio aqui é o que faz os botões desaparecerem
+        })
+      });
+
+      // 4. Responde ao Telegram para parar a animação de "carregando" no botão
+      await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          callback_query_id: callbackQuery.id,
+          text: `Registrado com sucesso: ${resultado}`
+        })
+      });
     }
 
     return NextResponse.json({ success: true });
-  } catch (error) {
-    return NextResponse.json({ error: 'Erro no processamento do Webhook' }, { status: 500 });
+  } catch (error: any) {
+    console.error("❌ Erro no webhook do Telegram:", error.message);
+    return NextResponse.json({ error: "Erro interno" }, { status: 500 });
   }
 }
