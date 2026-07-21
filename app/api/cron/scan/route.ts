@@ -75,7 +75,6 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
 
     if (dbError || !insertData) return;
 
-    // Mensagem atualizada refletindo a tecnologia Multi-Timeframe
     const mensagem = `🏆 *SINAL VIP FRACTAL (M5 + M15)* 🏆\n*Ativo:* ${ativoFormatado}\n*Ação:* ${iaData.sinal === 'COMPRA' ? '🟢 COMPRA' : '🔴 VENDA'}\n⏰ *Entrada:* ${formatadorHora.format(proximaVela)}\n⏳ *Expiração:* ${formatadorHora.format(expiracao)}\n📊 *Confluência:* RSI ${rsi.toFixed(2)}\n🧠 *Confiança IA:* ${iaData.confianca_padrao}`;
     
     await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
@@ -116,7 +115,12 @@ export async function GET(request: Request) {
     
     let ativos = ativosDB.map(a => a.ticker);
 
+    // 🔥 GUILHOTINA ANTI-OTC
+    ativos = ativos.filter(ativo => !ativo.toUpperCase().includes('OTC'));
+
     const horaSP = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
+    
+    // Filtro de Fim de Semana (Somente Cripto se for Sábado ou Domingo)
     if (horaSP.getDay() === 0 || horaSP.getDay() === 6) {
       ativos = ativos.filter(ativo => ativo.endsWith('-USD'));
     }
@@ -124,18 +128,24 @@ export async function GET(request: Request) {
     const torneioDeSinais: Array<{ativo: string, sinal: string, confianca: number, precoAtual: number, rsi: number}> = [];
 
     const agora = new Date();
+    
+    // Início da vela atual (para evitar enviar duplo na exata mesma janela de 5 min)
     const inicioVelaAtual = new Date(agora);
     inicioVelaAtual.setMinutes(agora.getMinutes() - (agora.getMinutes() % 5));
     inicioVelaAtual.setSeconds(0);
     inicioVelaAtual.setMilliseconds(0);
-    const inicioVelaISO = inicioVelaAtual.toISOString();
+
+    // Janela de avaliação para o LOSS (60 minutos de castigo)
+    const bloqueioTempo = new Date(agora);
+    bloqueioTempo.setMinutes(agora.getMinutes() - 60);
+    const cooldownISO = bloqueioTempo.toISOString();
 
     for (const ativo of ativos) {
       try {
-        // 🔥 INOVAÇÃO: Busca M5 e M15 SIMULTANEAMENTE
+        // 🔥 QUEBRA DE CACHE NO YAHOO FINANCE (Leitura em tempo real forçada)
         const [res5m, res15m] = await Promise.all([
-          fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=5m&range=1d`),
-          fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=15m&range=2d`)
+          fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=5m&range=1d`, { cache: 'no-store' }),
+          fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=15m&range=2d`, { cache: 'no-store' })
         ]);
 
         if (!res5m.ok || !res15m.ok) continue;
@@ -148,7 +158,6 @@ export async function GET(request: Request) {
         
         if (!quote5m?.close || !quote15m?.close) continue;
 
-        // Processa as anatomias (20 velas pro M5, 10 velas pro M15)
         const velas5m = mapearAnatomiaVelas(quote5m, 20);
         const velas15m = mapearAnatomiaVelas(quote15m, 10);
 
@@ -156,17 +165,32 @@ export async function GET(request: Request) {
 
         const rsi5m = calcularRSI(velas5m);
 
-        // Alargamos o filtro inicial (60/40) para permitir que a IA julgue padrões fractais valiosos
         if (rsi5m >= 60 || rsi5m <= 40) {
           
-          const { data: sinalJaEnviado } = await supabase
+          // 🔥 BUSCA A ÚLTIMA OPERAÇÃO (para checar se deu Red)
+          const { data: ultimoSinalData } = await supabase
             .from('historico_operacoes')
-            .select('id')
+            .select('resultado, created_at')
             .eq('ticker', ativo)
-            .gte('created_at', inicioVelaISO)
+            .gte('created_at', cooldownISO)
+            .order('created_at', { ascending: false })
             .limit(1);
 
-          if (sinalJaEnviado && sinalJaEnviado.length > 0) continue; 
+          if (ultimoSinalData && ultimoSinalData.length > 0) {
+            const ultimoSinal = ultimoSinalData[0];
+            const tempoDoUltimoSinal = new Date(ultimoSinal.created_at).getTime();
+
+            // Regra 1: Evita envio duplo dentro da mesma vela de 5 minutos
+            if (tempoDoUltimoSinal >= inicioVelaAtual.getTime()) {
+              continue; 
+            }
+
+            // Regra 2: Pausa de 60 minutos APENAS se a operação anterior foi LOSS
+            if (ultimoSinal.resultado === 'LOSS') {
+              console.log(`⏸️ [PAUSA ATIVA] ${ativo} ignorado. O último sinal resultou em LOSS (Red).`);
+              continue; 
+            }
+          }
 
           const { data: historico } = await supabase
             .from('historico_operacoes')
@@ -185,7 +209,6 @@ export async function GET(request: Request) {
             ? `Cripto: Volatilidade alta. Foque em rejeições simultâneas nos dois tempos gráficos.` 
             : `Mercado Tradicional: Foque em exaustão e retorno à média.`;
 
-          // 🔥 PROMPT INOVADOR: ANÁLISE FRACTAL MULTI-TIMEFRAME
           const prompt = `Você é um robô de Inteligência Artificial de Elite, especialista em Análise Multi-Timeframe e Price Action Fractal para Opções Binárias no ativo ${ativo}.
           
           Sua missão é cruzar os dados da TENDÊNCIA MACRO (M15) com o GATILHO MICRO (M5) para encontrar padrões ocultos de altíssima probabilidade.
@@ -218,7 +241,7 @@ export async function GET(request: Request) {
               model: 'llama-3.3-70b-versatile', 
               messages: [{ role: 'user', content: prompt }],
               response_format: { type: 'json_object' }, 
-              temperature: 0.15 // Pouquíssima criatividade, máximo rigor lógico
+              temperature: 0.15 
             })
           });
 
@@ -227,7 +250,6 @@ export async function GET(request: Request) {
           const ia = JSON.parse((await responseGroq.json()).choices[0].message.content.trim());
           const confiancaNumerica = parseInt(ia.confianca_padrao);
 
-          // Filtro Mestre de 70%
           if ((ia.sinal === 'COMPRA' || ia.sinal === 'VENDA') && confiancaNumerica >= 70) {
             torneioDeSinais.push({ ativo, sinal: ia.sinal, confianca: confiancaNumerica, precoAtual: velas5m[velas5m.length-1].fechamento, rsi: rsi5m });
           }
@@ -245,7 +267,7 @@ export async function GET(request: Request) {
       await enviarSinalTelegram(oMelhor.ativo, { sinal: oMelhor.sinal, confianca_padrao: `${oMelhor.confianca}%` }, oMelhor.precoAtual, oMelhor.rsi);
     }
 
-    return NextResponse.json({ success: true, mensagem: `Análise Fractal M15+M5 finalizada.` });
+    return NextResponse.json({ success: true, mensagem: `Análise Fractal M15+M5 finalizada. Filtro LOSS de 60m ativo.` });
 
   } catch (error: any) {
     return NextResponse.json({ error: "Erro interno do servidor" }, { status: 500 });
