@@ -119,10 +119,38 @@ export async function GET(request: Request) {
     ativos = ativos.filter(ativo => !ativo.toUpperCase().includes('OTC'));
 
     const horaSP = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
-    
-    // Filtro de Fim de Semana (Somente Cripto se for Sábado ou Domingo)
-    if (horaSP.getDay() === 0 || horaSP.getDay() === 6) {
-      ativos = ativos.filter(ativo => ativo.endsWith('-USD'));
+    const diaSemana = horaSP.getDay(); // 0 = Domingo, 1 = Segunda... 6 = Sábado
+    const horaAtual = horaSP.getHours();
+
+    // 🔥 FILTRO DE HORÁRIO COMERCIAL E FIM DE SEMANA
+    ativos = ativos.filter(ativo => {
+      const isCrypto = ativo.endsWith('-USD');
+      
+      // 1. Criptomoedas rodam 24/7 sem interrupções
+      if (isCrypto) return true;
+
+      // 2. Regras para Mercado Tradicional (Forex, Ações, B3)
+      // Fechamento no final de semana (Forex fecha Sexta 18h e abre Domingo 18h BRT)
+      if (diaSemana === 6) return false; // Sábado (Totalmente Fechado)
+      if (diaSemana === 5 && horaAtual >= 18) return false; // Sexta depois das 18h (Fechado)
+      if (diaSemana === 0 && horaAtual < 18) return false; // Domingo antes das 18h (Fechado)
+
+      // 3. Janela de Operação Diária (Evita mercado sem liquidez)
+      // Abre às 04:00 (Londres) e fecha às 17:00 (NY)
+      const HORA_ABERTURA = 4;
+      const HORA_FECHAMENTO = 17;
+
+      if (horaAtual < HORA_ABERTURA || horaAtual >= HORA_FECHAMENTO) {
+        return false;
+      }
+
+      return true; // Passou por todas as restrições, o ativo está operável
+    });
+
+    // Se após os filtros não houver nenhum mercado aberto no momento
+    if (ativos.length === 0) {
+       console.log("💤 Mercados fechados no momento. Nenhuma varredura será feita.");
+       return NextResponse.json({ success: true, mensagem: `Mercados fechados no momento.` });
     }
 
     const torneioDeSinais: Array<{ativo: string, sinal: string, confianca: number, precoAtual: number, rsi: number}> = [];
@@ -142,7 +170,7 @@ export async function GET(request: Request) {
 
     for (const ativo of ativos) {
       try {
-        // 🔥 QUEBRA DE CACHE NO YAHOO FINANCE (Leitura em tempo real forçada)
+        // 🔥 QUEBRA DE CACHE NO YAHOO FINANCE
         const [res5m, res15m] = await Promise.all([
           fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=5m&range=1d`, { cache: 'no-store' }),
           fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=15m&range=2d`, { cache: 'no-store' })
@@ -180,12 +208,10 @@ export async function GET(request: Request) {
             const ultimoSinal = ultimoSinalData[0];
             const tempoDoUltimoSinal = new Date(ultimoSinal.created_at).getTime();
 
-            // Regra 1: Evita envio duplo dentro da mesma vela de 5 minutos
             if (tempoDoUltimoSinal >= inicioVelaAtual.getTime()) {
               continue; 
             }
 
-            // Regra 2: Pausa de 60 minutos APENAS se a operação anterior foi LOSS
             if (ultimoSinal.resultado === 'LOSS') {
               console.log(`⏸️ [PAUSA ATIVA] ${ativo} ignorado. O último sinal resultou em LOSS (Red).`);
               continue; 
@@ -267,7 +293,7 @@ export async function GET(request: Request) {
       await enviarSinalTelegram(oMelhor.ativo, { sinal: oMelhor.sinal, confianca_padrao: `${oMelhor.confianca}%` }, oMelhor.precoAtual, oMelhor.rsi);
     }
 
-    return NextResponse.json({ success: true, mensagem: `Análise Fractal M15+M5 finalizada. Filtro LOSS de 60m ativo.` });
+    return NextResponse.json({ success: true, mensagem: `Análise finalizada. Filtro de Horários Ativo.` });
 
   } catch (error: any) {
     return NextResponse.json({ error: "Erro interno do servidor" }, { status: 500 });
