@@ -100,6 +100,9 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
 }
 
 export async function GET(request: Request) {
+  // LOG 1: O robô acordou! (Visível a cada 5 minutos na Vercel)
+  console.log("🤖 [CRON MTF] Robô acordou! Iniciando varredura Multi-Timeframe Avançada...");
+
   try {
     const CRON_SECRET = process.env.CRON_SECRET || '17a85b09'; 
     const GROQ_BOT_KEY = process.env.GROQ_BOT_KEY || ''; 
@@ -134,8 +137,13 @@ export async function GET(request: Request) {
     });
 
     if (ativos.length === 0) {
+       // LOG 2: Mercado fechado
+       console.log("💤 Mercados fechados no momento. O robô vai voltar a dormir.");
        return NextResponse.json({ success: true, mensagem: `Mercados fechados no momento.` });
     }
+
+    // LOG 3: Quantidade de ativos na tela do radar
+    console.log(`📊 Analisando ${ativos.length} ativos permitidos no horário atual...`);
 
     const torneioDeSinais: Array<{ativo: string, sinal: string, confianca: number, precoAtual: number, rsi: number}> = [];
     const agora = new Date();
@@ -188,7 +196,10 @@ export async function GET(request: Request) {
             const tempoDoUltimoSinal = new Date(ultimoSinal.created_at).getTime();
 
             if (tempoDoUltimoSinal >= inicioVelaAtual.getTime()) continue; 
-            if (ultimoSinal.resultado === 'LOSS') continue; 
+            if (ultimoSinal.resultado === 'LOSS') {
+              console.log(`⏸️ [PAUSA] ${ativo} ignorado (LOSS recente).`);
+              continue; 
+            }
           }
 
           const { data: historico } = await supabase
@@ -244,11 +255,17 @@ export async function GET(request: Request) {
     if (torneioDeSinais.length > 0) {
       torneioDeSinais.sort((a, b) => b.confianca - a.confianca);
       const oMelhor = torneioDeSinais[0];
+      // LOG 4: Achou Sinal
+      console.log(`🥇 FRACTAL DETECTADO: ${oMelhor.ativo} (${oMelhor.confianca}%)`);
       await enviarSinalTelegram(oMelhor.ativo, { sinal: oMelhor.sinal, confianca_padrao: `${oMelhor.confianca}%` }, oMelhor.precoAtual, oMelhor.rsi);
+    } else {
+      // LOG 5: Não achou nada que preste
+      console.log("🔎 Varredura concluída. Nenhum ativo atingiu a confiança mínima de 70% nesta vela.");
     }
 
     return NextResponse.json({ success: true, mensagem: `Análise finalizada.` });
   } catch (error: any) {
+    console.error("❌ ERRO CRÍTICO NO CRON:", error.message);
     return NextResponse.json({ error: "Erro interno do servidor" }, { status: 500 });
   }
 }
