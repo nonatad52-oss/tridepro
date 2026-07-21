@@ -4,7 +4,6 @@ import { createClient } from '@supabase/supabase-js';
 export const maxDuration = 60; 
 export const dynamic = 'force-dynamic';
 
-// Inicialização segura das credenciais com fallback dinâmico
 const getSupabaseClient = () => {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
   const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY;
@@ -15,7 +14,6 @@ const getSupabaseClient = () => {
   return createClient(url, key);
 };
 
-// Função auxiliar para mapear a anatomia das velas de forma limpa
 function mapearAnatomiaVelas(quote: any, quantidade: number) {
   const blocoVelas = [];
   for (let i = 0; i < quote.close.length; i++) {
@@ -39,7 +37,6 @@ function mapearAnatomiaVelas(quote: any, quantidade: number) {
   return blocoVelas.slice(-quantidade);
 }
 
-// Cálculo matemático exato do RSI 14
 function calcularRSI(velas: any[]) {
   if (velas.length < 15) return 50;
   const amostra = velas.slice(-14);
@@ -85,10 +82,15 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
         text: mensagem, 
         parse_mode: 'Markdown', 
         reply_markup: { 
-          inline_keyboard: [[
-            { text: '✅ WIN', callback_data: `WIN_${insertData.id}` }, 
-            { text: '❌ LOSS', callback_data: `LOSS_${insertData.id}` }
-          ]] 
+          inline_keyboard: [
+            [
+              { text: '✅ WIN', callback_data: `WIN_${insertData.id}` }, 
+              { text: '❌ LOSS', callback_data: `LOSS_${insertData.id}` }
+            ],
+            [
+              { text: '🗑️ NÃO PEGUEI (Apagar)', callback_data: `DEL_${insertData.id}` }
+            ]
+          ] 
         } 
       }),
     });
@@ -98,8 +100,6 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
 }
 
 export async function GET(request: Request) {
-  console.log("🤖 [CRON MTF] Iniciando varredura Multi-Timeframe Avançada...");
-  
   try {
     const CRON_SECRET = process.env.CRON_SECRET || '17a85b09'; 
     const GROQ_BOT_KEY = process.env.GROQ_BOT_KEY || ''; 
@@ -114,63 +114,43 @@ export async function GET(request: Request) {
     if (!ativosDB) return NextResponse.json({ error: "Erro ao buscar ativos" }, { status: 500 });
     
     let ativos = ativosDB.map(a => a.ticker);
-
-    // 🔥 GUILHOTINA ANTI-OTC
     ativos = ativos.filter(ativo => !ativo.toUpperCase().includes('OTC'));
 
     const horaSP = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
-    const diaSemana = horaSP.getDay(); // 0 = Domingo, 1 = Segunda... 6 = Sábado
+    const diaSemana = horaSP.getDay(); 
     const horaAtual = horaSP.getHours();
 
-    // 🔥 FILTRO DE HORÁRIO COMERCIAL E FIM DE SEMANA
     ativos = ativos.filter(ativo => {
       const isCrypto = ativo.endsWith('-USD');
-      
-      // 1. Criptomoedas rodam 24/7 sem interrupções
       if (isCrypto) return true;
+      if (diaSemana === 6) return false; 
+      if (diaSemana === 5 && horaAtual >= 18) return false; 
+      if (diaSemana === 0 && horaAtual < 18) return false; 
 
-      // 2. Regras para Mercado Tradicional (Forex, Ações, B3)
-      // Fechamento no final de semana (Forex fecha Sexta 18h e abre Domingo 18h BRT)
-      if (diaSemana === 6) return false; // Sábado (Totalmente Fechado)
-      if (diaSemana === 5 && horaAtual >= 18) return false; // Sexta depois das 18h (Fechado)
-      if (diaSemana === 0 && horaAtual < 18) return false; // Domingo antes das 18h (Fechado)
-
-      // 3. Janela de Operação Diária (Evita mercado sem liquidez)
-      // Abre às 04:00 (Londres) e fecha às 17:00 (NY)
       const HORA_ABERTURA = 4;
       const HORA_FECHAMENTO = 17;
-
-      if (horaAtual < HORA_ABERTURA || horaAtual >= HORA_FECHAMENTO) {
-        return false;
-      }
-
-      return true; // Passou por todas as restrições, o ativo está operável
+      if (horaAtual < HORA_ABERTURA || horaAtual >= HORA_FECHAMENTO) return false;
+      return true;
     });
 
-    // Se após os filtros não houver nenhum mercado aberto no momento
     if (ativos.length === 0) {
-       console.log("💤 Mercados fechados no momento. Nenhuma varredura será feita.");
        return NextResponse.json({ success: true, mensagem: `Mercados fechados no momento.` });
     }
 
     const torneioDeSinais: Array<{ativo: string, sinal: string, confianca: number, precoAtual: number, rsi: number}> = [];
-
     const agora = new Date();
     
-    // Início da vela atual (para evitar enviar duplo na exata mesma janela de 5 min)
     const inicioVelaAtual = new Date(agora);
     inicioVelaAtual.setMinutes(agora.getMinutes() - (agora.getMinutes() % 5));
     inicioVelaAtual.setSeconds(0);
     inicioVelaAtual.setMilliseconds(0);
 
-    // Janela de avaliação para o LOSS (60 minutos de castigo)
     const bloqueioTempo = new Date(agora);
     bloqueioTempo.setMinutes(agora.getMinutes() - 60);
     const cooldownISO = bloqueioTempo.toISOString();
 
     for (const ativo of ativos) {
       try {
-        // 🔥 QUEBRA DE CACHE NO YAHOO FINANCE
         const [res5m, res15m] = await Promise.all([
           fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=5m&range=1d`, { cache: 'no-store' }),
           fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=15m&range=2d`, { cache: 'no-store' })
@@ -195,7 +175,6 @@ export async function GET(request: Request) {
 
         if (rsi5m >= 60 || rsi5m <= 40) {
           
-          // 🔥 BUSCA A ÚLTIMA OPERAÇÃO (para checar se deu Red)
           const { data: ultimoSinalData } = await supabase
             .from('historico_operacoes')
             .select('resultado, created_at')
@@ -208,14 +187,8 @@ export async function GET(request: Request) {
             const ultimoSinal = ultimoSinalData[0];
             const tempoDoUltimoSinal = new Date(ultimoSinal.created_at).getTime();
 
-            if (tempoDoUltimoSinal >= inicioVelaAtual.getTime()) {
-              continue; 
-            }
-
-            if (ultimoSinal.resultado === 'LOSS') {
-              console.log(`⏸️ [PAUSA ATIVA] ${ativo} ignorado. O último sinal resultou em LOSS (Red).`);
-              continue; 
-            }
+            if (tempoDoUltimoSinal >= inicioVelaAtual.getTime()) continue; 
+            if (ultimoSinal.resultado === 'LOSS') continue; 
           }
 
           const { data: historico } = await supabase
@@ -236,29 +209,14 @@ export async function GET(request: Request) {
             : `Mercado Tradicional: Foque em exaustão e retorno à média.`;
 
           const prompt = `Você é um robô de Inteligência Artificial de Elite, especialista em Análise Multi-Timeframe e Price Action Fractal para Opções Binárias no ativo ${ativo}.
-          
-          Sua missão é cruzar os dados da TENDÊNCIA MACRO (M15) com o GATILHO MICRO (M5) para encontrar padrões ocultos de altíssima probabilidade.
-          
+          Sua missão é cruzar os dados da TENDÊNCIA MACRO (M15) com o GATILHO MICRO (M5).
           ${contextoMercado}
           RSI Atual (M5): ${rsi5m.toFixed(2)}
-
-          📊 TENDÊNCIA MACRO (Últimas 10 velas de M15):
-          ${JSON.stringify(velas15m)}
-
-          🔎 GATILHO MICRO (Últimas 20 velas de M5):
-          ${JSON.stringify(velas5m)}
-
-          Diário de Erros e Acertos Recentes:
-          ${diarioDeAprendizado}
-          
-          REGRAS DE CONFLUÊNCIA FRACTAL (M15 + M5):
-          1. MICRO-PADRÕES ALINHADOS: Procure sinais de exaustão que se repetem. Se o M15 deixa um longo pavio de rejeição em cima, e o M5 forma um engolfo de baixa ou *doji*, a probabilidade de "VENDA" é gigantesca.
-          2. Não dependa apenas de um RSI esticado. Se o RSI está em 65, mas o Price Action fractal mostra dupla exaustão de topo (M15 e M5 fracos), isso é mais forte que um RSI de 80 isolado.
-          3. ARMADILHAS: Se o M15 mostra velas com corpos gigantes e sem pavio, não opere contra essa força, independente do RSI do M5. Responda "NEUTRO".
-          4. Se os tempos gráficos concordarem (Ex: M15 demonstrando fraqueza e M5 confirmando reversão), atribua confiança acima de 70%.
-
-          Sua resposta deve ser EXCLUSIVAMENTE um JSON válido:
-          {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%"}`;
+          📊 TENDÊNCIA MACRO (Últimas 10 velas de M15): ${JSON.stringify(velas15m)}
+          🔎 GATILHO MICRO (Últimas 20 velas de M5): ${JSON.stringify(velas5m)}
+          Diário de Erros e Acertos Recentes: ${diarioDeAprendizado}
+          REGRAS: 1. MICRO-PADRÕES ALINHADOS. 2. Não dependa só de RSI. 3. Cuidado com armadilhas de velas de força. 4. Confiança acima de 70% se alinhado.
+          Sua resposta deve ser EXCLUSIVAMENTE um JSON válido: {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%"}`;
 
           const responseGroq = await fetch('https://api.groq.com/openai/v1/chat/completions', {
             method: 'POST',
@@ -280,21 +238,16 @@ export async function GET(request: Request) {
             torneioDeSinais.push({ ativo, sinal: ia.sinal, confianca: confiancaNumerica, precoAtual: velas5m[velas5m.length-1].fechamento, rsi: rsi5m });
           }
         }
-      } catch (e: any) { 
-        console.log(`❌ Erro em ${ativo}, pulando...`); 
-      }
+      } catch (e: any) { continue; }
     }
 
     if (torneioDeSinais.length > 0) {
       torneioDeSinais.sort((a, b) => b.confianca - a.confianca);
       const oMelhor = torneioDeSinais[0];
-      
-      console.log(`🥇 FRACTAL DETECTADO: ${oMelhor.ativo} (${oMelhor.confianca}%)`);
       await enviarSinalTelegram(oMelhor.ativo, { sinal: oMelhor.sinal, confianca_padrao: `${oMelhor.confianca}%` }, oMelhor.precoAtual, oMelhor.rsi);
     }
 
-    return NextResponse.json({ success: true, mensagem: `Análise finalizada. Filtro de Horários Ativo.` });
-
+    return NextResponse.json({ success: true, mensagem: `Análise finalizada.` });
   } catch (error: any) {
     return NextResponse.json({ error: "Erro interno do servidor" }, { status: 500 });
   }
