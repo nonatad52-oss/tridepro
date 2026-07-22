@@ -12,50 +12,6 @@ const getSupabaseClient = () => {
   return createClient(url, key);
 };
 
-// --- FUNÇÕES DE CALENDÁRIO ECONÔMICO (NOTÍCIAS) ---
-async function buscarNoticiasAltoImpacto() {
-  try {
-    // Fonte confiável e amigável para robôs (equivalente aos 3 touros do Investing)
-    const res = await fetch('https://nfs.faireconomy.media/ff_calendar_thisweek.json', { cache: 'no-store' });
-    if (!res.ok) return [];
-    const dados = await res.json();
-    // Filtra apenas notícias de alto impacto ("High")
-    return dados.filter((noticia: any) => noticia.impact === 'High');
-  } catch (erro) {
-    console.error("⚠️ Falha ao buscar calendário econômico:", erro);
-    return [];
-  }
-}
-
-function ativoAfetadoPorNoticia(ticker: string, noticias: any[], dataAtual: Date): boolean {
-  if (!noticias || noticias.length === 0) return false;
-
-  // Descobre quais moedas afetam este ativo
-  const moedasDoAtivo: string[] = [];
-  if (ticker.endsWith('=X')) {
-    moedasDoAtivo.push(ticker.substring(0, 3), ticker.substring(3, 6)); // Ex: EUR, USD
-  } else if (ticker.endsWith('.SA')) {
-    moedasDoAtivo.push('BRL', 'USD'); // Notícias do dólar afetam o Brasil diretamente
-  } else {
-    moedasDoAtivo.push('USD'); // Criptos e Ações Americanas atreladas ao dólar
-  }
-
-  const tempoAtual = dataAtual.getTime();
-
-  for (const noticia of noticias) {
-    if (moedasDoAtivo.includes(noticia.country)) {
-      const tempoNoticia = new Date(noticia.date).getTime();
-      const diferencaMinutos = (tempoAtual - tempoNoticia) / (1000 * 60);
-
-      // Bloqueia se estiver dentro da janela de -15 a +15 minutos do evento
-      if (diferencaMinutos >= -15 && diferencaMinutos <= 15) {
-        return true; 
-      }
-    }
-  }
-  return false;
-}
-
 // --- FUNÇÕES MATEMÁTICAS E DE MERCADO ---
 function isMercadoAberto(ticker: string, dataHora: Date) {
   const dia = dataHora.getDay(); 
@@ -214,7 +170,7 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
 
 // --- FUNÇÃO PRINCIPAL DO ROBÔ ---
 export async function GET(request: Request) {
-  console.log("🤖 [CRON SNIPER] Acordou! Verificando bolsas abertas e calendário econômico...");
+  console.log("🤖 [CRON SNIPER] Acordou! Verificando bolsas abertas...");
 
   try {
     const CRON_SECRET = process.env.CRON_SECRET || '17a85b09'; 
@@ -240,9 +196,6 @@ export async function GET(request: Request) {
        return NextResponse.json({ success: true, mensagem: `Mercados fechados no momento.` });
     }
 
-    // 2. Busca Notícias Globais
-    const noticiasAltoImpacto = await buscarNoticiasAltoImpacto();
-    console.log(`🌍 Calendário Econômico: ${noticiasAltoImpacto.length} notícias de ALTO impacto agendadas para esta semana.`);
     console.log(`📊 Rastreador ativo em ${ativosAtivos.length} mercados abertos neste momento...`);
 
     const torneioDeSinais = [];
@@ -257,12 +210,6 @@ export async function GET(request: Request) {
 
     for (const ativo of ativosAtivos) {
       try {
-        // 3. Filtro Sniper de Notícia
-        if (ativoAfetadoPorNoticia(ativo, noticiasAltoImpacto, agora)) {
-          console.log(`⚠️ [ALERTA] Operações em ${ativo} bloqueadas. Notícia de 3 TOUROS acontecendo agora!`);
-          continue; // Pula a análise deste ativo
-        }
-
         const [res5m, res15m] = await Promise.all([
           fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=5m&range=1d`, { cache: 'no-store' }),
           fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=15m&range=2d`, { cache: 'no-store' })
