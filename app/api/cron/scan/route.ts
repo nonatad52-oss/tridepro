@@ -11,53 +11,40 @@ const getSupabaseClient = () => {
   return createClient(url, key);
 };
 
-// --- FILTRO DE HORÁRIO DE MERCADO ---
+// --- FILTRO DE HORÁRIO ---
 function isMercadoAberto(ticker: string, dataHora: Date) {
   const dia = dataHora.getDay(); 
   const hora = dataHora.getHours();
   const minuto = dataHora.getMinutes();
   const tempoDecimal = hora + (minuto / 60);
-
   if (ticker.endsWith('-USD')) return true;
-
   const isFimDeSemana = (dia === 0 || dia === 6);
-
   if (ticker.endsWith('=X')) {
     if (dia === 6) return false; 
     if (dia === 5 && tempoDecimal >= 17) return false; 
     if (dia === 0 && tempoDecimal < 18) return false; 
     return true;
   }
-
   if (ticker.endsWith('.SA')) {
     if (isFimDeSemana) return false;
     if (tempoDecimal < 10 || tempoDecimal >= 17) return false;
     return true;
   }
-
   if (isFimDeSemana) return false;
   if (tempoDecimal < 10.5 || tempoDecimal >= 17) return false;
-  
   return true;
 }
 
-// --- ANÁLISE DE CANDLES E INDICADORES ---
+// --- ANÁLISE MATEMÁTICA ---
 function mapearAnatomiaVelas(quote: any, quantidade: number) {
   const blocoVelas = [];
   for (let i = 0; i < quote.close.length; i++) {
     if (quote.close[i] != null && quote.open[i] != null && quote.high[i] != null && quote.low[i] != null) {
-      const ab = quote.open[i];
-      const fc = quote.close[i];
-      const max = quote.high[i];
-      const min = quote.low[i];
-      
-      const tamanhoCorpo = Math.abs(fc - ab);
-      const pavioSuperior = max - Math.max(ab, fc);
-      const pavioInferior = Math.min(ab, fc) - min;
-      
+      const ab = quote.open[i]; const fc = quote.close[i];
+      const max = quote.high[i]; const min = quote.low[i];
       blocoVelas.push({ 
         abertura: ab, maxima: max, minima: min, fechamento: fc,
-        corpo: tamanhoCorpo, pavio_sup: pavioSuperior, pavio_inf: pavioInferior, 
+        corpo: Math.abs(fc - ab), pavio_sup: max - Math.max(ab, fc), pavio_inf: Math.min(ab, fc) - min, 
         direcao: fc >= ab ? "ALTA" : "BAIXA"
       });
     }
@@ -70,12 +57,10 @@ function calcularRSI(velas: any[]) {
   const amostra = velas.slice(-14);
   let ganhos = 0, perdas = 0;
   for (let i = 1; i < amostra.length; i++) {
-    const diferenca = amostra[i].fechamento - amostra[i-1].fechamento;
-    if (diferenca > 0) ganhos += diferenca;
-    else perdas += Math.abs(diferenca);
+    const dif = amostra[i].fechamento - amostra[i-1].fechamento;
+    if (dif > 0) ganhos += dif; else perdas += Math.abs(dif);
   }
-  ganhos /= 14;
-  perdas /= 14;
+  ganhos /= 14; perdas /= 14;
   if (perdas === 0) return 100;
   return 100 - (100 / (1 + (ganhos / perdas)));
 }
@@ -84,68 +69,45 @@ function calcularEMA(velas: any[], periodo: number) {
   if (velas.length < periodo) return null;
   const k = 2 / (periodo + 1);
   let ema = velas[0].fechamento;
-  for (let i = 1; i < velas.length; i++) {
-    ema = (velas[i].fechamento * k) + (ema * (1 - k));
-  }
+  for (let i = 1; i < velas.length; i++) ema = (velas[i].fechamento * k) + (ema * (1 - k));
   return ema;
 }
 
 function identificarPadraoCandle(velas: any[]) {
   if (velas.length < 2) return "NENHUM";
-  const atual = velas[velas.length - 1];
-  const anterior = velas[velas.length - 2];
-  const corpoAtual = atual.corpo;
-  const tamanhoTotalAtual = atual.maxima - atual.minima;
+  const atual = velas[velas.length - 1]; const anterior = velas[velas.length - 2];
+  const corpoAtual = atual.corpo; const tamanhoTotalAtual = atual.maxima - atual.minima;
   
   if (corpoAtual < (tamanhoTotalAtual * 0.20)) return "DOJI_EXAUSTAO";
-
-  if (anterior.direcao === "BAIXA" && atual.direcao === "ALTA" && atual.fechamento > anterior.abertura) {
-    return "ENGOLFO_DE_ALTA";
-  }
-  if (anterior.direcao === "ALTA" && atual.direcao === "BAIXA" && atual.fechamento < anterior.abertura) {
-    return "ENGOLFO_DE_BAIXA";
-  }
-  
-  if (atual.pavio_inf > corpoAtual * 1.5 && atual.pavio_sup <= corpoAtual * 0.8) {
-    return "MARTELO_REJEICAO_BAIXA";
-  }
-  if (atual.pavio_sup > corpoAtual * 1.5 && atual.pavio_inf <= corpoAtual * 0.8) {
-    return "ESTRELA_CADENTE_REJEICAO_ALTA";
-  }
-  
+  if (anterior.direcao === "BAIXA" && atual.direcao === "ALTA" && atual.fechamento > anterior.abertura) return "ENGOLFO_DE_ALTA";
+  if (anterior.direcao === "ALTA" && atual.direcao === "BAIXA" && atual.fechamento < anterior.abertura) return "ENGOLFO_DE_BAIXA";
+  if (atual.pavio_inf > corpoAtual * 1.5 && atual.pavio_sup <= corpoAtual * 0.8) return "MARTELO_REJEICAO_BAIXA";
+  if (atual.pavio_sup > corpoAtual * 1.5 && atual.pavio_inf <= corpoAtual * 0.8) return "ESTRELA_CADENTE_REJEICAO_ALTA";
   return "VELA_DE_FORCA_NORMAL";
 }
 
-// --- ENVIO TELEGRAM E REGISTRO BANCO ---
+// --- ENVIO TELEGRAM ---
 async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: number, rsi: number, padrao: string) {
   try {
     const supabase = getSupabaseClient();
     const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
     const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
-
-    let ativoFormatado = ativo.endsWith('=X') ? ativo.substring(0, 3) + '/' + ativo.substring(3, 6) : ativo.replace('-', '/');
+    const ativoFormatado = ativo.endsWith('=X') ? ativo.substring(0, 3) + '/' + ativo.substring(3, 6) : ativo.replace('-', '/');
     const formatadorHora = new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' });
     const agora = new Date();
     
     const proximaVela = new Date(agora);
     proximaVela.setMinutes(agora.getMinutes() + (5 - (agora.getMinutes() % 5)));
     proximaVela.setSeconds(0); proximaVela.setMilliseconds(0);
-    
-    const expiracao = new Date(proximaVela);
-    expiracao.setMinutes(expiracao.getMinutes() + 5);
+    const expiracao = new Date(proximaVela); expiracao.setMinutes(expiracao.getMinutes() + 5);
 
-    // REGISTRA NO SUPABASE
-    const { data: insertData, error: dbError } = await supabase
-      .from('historico_operacoes')
+    const { data: insertData } = await supabase.from('historico_operacoes')
       .insert([{ ticker: ativo, sinal: iaData.sinal, taxa_entrada: precoAtual, resultado: 'PENDENTE' }])
       .select('id').single();
 
-    if (dbError) {
-      console.error("🚨 ERRO CRÍTICO AO SALVAR NO SUPABASE:", dbError.message);
-      return;
-    }
+    if (!insertData) return;
 
-    const mensagem = `🤖 *SINAL IA FRACTAL (M5 + M15)* 🤖
+    const mensagem = `🤖 *SINAL IA COM APRENDIZADO* 🤖
 *Ativo:* ${ativoFormatado}
 *Ação:* ${iaData.sinal === 'COMPRA' ? '🟢 COMPRA' : '🔴 VENDA'}
 ⏰ *Entrada:* ${formatadorHora.format(proximaVela)}
@@ -153,16 +115,13 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
 
 📊 *Gatilho:* ${padrao.replace(/_/g, ' ')}
 🔥 *RSI M5:* ${rsi.toFixed(2)}
-🧠 *Análise IA:* ${iaData.motivo}
-🎯 *Confiança:* ${iaData.confianca_padrao}`;
+🧠 *Raciocínio:* ${iaData.motivo}
+🎯 *Confiança IA:* ${iaData.confianca_padrao}`;
     
     await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-      method: 'POST', 
-      headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ 
-        chat_id: TELEGRAM_CHAT_ID, 
-        text: mensagem, 
-        parse_mode: 'Markdown', 
+        chat_id: TELEGRAM_CHAT_ID, text: mensagem, parse_mode: 'Markdown', 
         reply_markup: { 
           inline_keyboard: [
             [{ text: '✅ WIN', callback_data: `WIN_${insertData.id}` }, { text: '❌ LOSS', callback_data: `LOSS_${insertData.id}` }],
@@ -171,93 +130,78 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
         } 
       }),
     });
-  } catch (error: any) {
-    console.error("❌ Erro ao enviar sinal:", error.message);
-  }
+  } catch (error: any) { console.error("Erro no envio:", error.message); }
 }
 
-// --- FUNÇÃO PRINCIPAL DO CRON ---
 export async function GET(request: Request) {
-  console.log("🤖 [CRON FLUXO IA] Acordou! Iniciando varredura...");
+  console.log("🤖 Iniciando varredura com Motor de Aprendizado...");
 
   try {
     const CRON_SECRET = process.env.CRON_SECRET || '17a85b09'; 
     const GROQ_BOT_KEY = process.env.GROQ_BOT_KEY || ''; 
-    
     const { searchParams } = new URL(request.url);
-    if (searchParams.get('key') !== CRON_SECRET) {
-      return NextResponse.json({ error: 'Não autorizado' }, { status: 401 });
-    }
+    if (searchParams.get('key') !== CRON_SECRET) return NextResponse.json({ error: 'Não autorizado' }, { status: 401 });
 
     const supabase = getSupabaseClient();
     const { data: ativosDB } = await supabase.from('ativos_global').select('ticker').eq('status', 'ativo');
-    if (!ativosDB) return NextResponse.json({ error: "Erro ao buscar ativos" }, { status: 500 });
+    if (!ativosDB) return NextResponse.json({ error: "Erro DB" }, { status: 500 });
     
     let ativosBrutos = ativosDB.map(a => a.ticker).filter(a => !a.toUpperCase().includes('OTC'));
-    
     const horaSP = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
     let ativosAtivos = ativosBrutos.filter(ativo => isMercadoAberto(ativo, horaSP));
-
-    if (ativosAtivos.length === 0) {
-       console.log("💤 Mercados fechados no momento.");
-       return NextResponse.json({ success: true, mensagem: `Mercados fechados no momento.` });
-    }
 
     const torneioDeSinais = [];
     const agoraMs = Date.now();
 
     for (const ativo of ativosAtivos) {
       try {
-        // TRAVA PRINCIPAL CORRIGIDA: Puxa as últimas 4 operações para evitar que o LOSS seja "enterrado"
-        const { data: ultimosDoAtivo } = await supabase
+        // --- 1. MEMÓRIA DE MERCADO (O APRENDIZADO DA IA) ---
+        // Puxamos as últimas 10 operações reais deste ativo no banco de dados para a IA saber como ela está performando
+        const { data: historicoRecente } = await supabase
           .from('historico_operacoes')
-          .select('created_at, resultado')
+          .select('resultado, sinal, created_at')
           .eq('ticker', ativo)
           .order('created_at', { ascending: false })
-          .limit(4);
+          .limit(10);
 
-        if (ultimosDoAtivo && ultimosDoAtivo.length > 0) {
-          const ultimoSinalAbsoluto = ultimosDoAtivo[0];
-          const tempoUltimoMs = new Date(ultimoSinalAbsoluto.created_at).getTime();
-          const minutosDesdeOUltimo = (agoraMs - tempoUltimoMs) / (1000 * 60);
+        let wins = 0; let losses = 0;
+        let comportamentoRecente = "Sem dados suficientes.";
 
-          // 1. Evita sobrepor sinais no mesmo candle (espera no mínimo 5 minutos)
-          if (minutosDesdeOUltimo < 5) {
-            console.log(`⏳ [AGUARDANDO EXPIRAÇÃO] ${ativo} operando agora. Aguardando...`);
-            continue;
-          }
+        if (historicoRecente && historicoRecente.length > 0) {
+          // Bloqueio severo de 45 min se teve LOSS nas últimas 4 operações
+          const teveLossRecente = historicoRecente.slice(0, 4).some(op => {
+            const minDecorridos = (agoraMs - new Date(op.created_at).getTime()) / (1000 * 60);
+            return op.resultado === 'LOSS' && minDecorridos < 45;
+          });
+          
+          if (teveLossRecente) continue; // Pula o ativo se estiver em cooldown
 
-          // 2. NOVA REGRA DO LOSS: Verifica se ALGUMA das últimas operações recentes (45 min) deu LOSS
-          const teveLossRecente = ultimosDoAtivo.some(op => {
-            const minDecorridosOp = (agoraMs - new Date(op.created_at).getTime()) / (1000 * 60);
-            return op.resultado === 'LOSS' && minDecorridosOp < 45;
+          // Estatísticas para ensinar a IA
+          historicoRecente.forEach(op => {
+            if (op.resultado === 'WIN') wins++;
+            if (op.resultado === 'LOSS') losses++;
           });
 
-          if (teveLossRecente) {
-            console.log(`⛔ [LOSS COOLDOWN] ${ativo} tomou um LOSS recente. Ignorando pelo resto dos 45 min.`);
-            continue; // Pula este ativo!
+          if (wins + losses > 0) {
+            const taxaAcerto = Math.round((wins / (wins + losses)) * 100);
+            comportamentoRecente = `Nas últimas ${wins+losses} operações neste ativo, você teve ${wins} WINS e ${losses} LOSSES (Taxa de acerto: ${taxaAcerto}%).`;
           }
         }
 
-        // CONSULTA DE MERCADO
+        // --- 2. COLETA TÉCNICA ---
         const [res5m, res15m] = await Promise.all([
           fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=5m&range=1d`, { cache: 'no-store' }),
           fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=15m&range=2d`, { cache: 'no-store' })
         ]);
 
         if (!res5m.ok || !res15m.ok) continue;
-
-        const json5m = await res5m.json();
-        const json15m = await res15m.json();
-
+        const json5m = await res5m.json(); const json15m = await res15m.json();
         const quote5m = json5m.chart?.result?.[0]?.indicators?.quote?.[0];
         const quote15m = json15m.chart?.result?.[0]?.indicators?.quote?.[0];
-        
         if (!quote5m?.close || !quote15m?.close) continue;
 
         const velas5m = mapearAnatomiaVelas(quote5m, 20);
         const velas15m = mapearAnatomiaVelas(quote15m, 20);
-
         if (velas5m.length < 15 || velas15m.length < 20) continue;
 
         const rsi5m = calcularRSI(velas5m);
@@ -271,34 +215,38 @@ export async function GET(request: Request) {
           else if (velas15m[velas15m.length - 1].fechamento < ema20_M15) tendenciaMacro = "BAIXA";
         }
 
+        // --- 3. PROMPT CONSCIENTE (A IA AGORA SABE SE ESTÁ ERRANDO) ---
         const temPadrao = padraoMicro !== "VELA_DE_FORCA_NORMAL" && padraoMicro !== "NENHUM";
         const rsiOportunidade = rsi5m <= 45 || rsi5m >= 55;
 
         if (temPadrao || rsiOportunidade) {
-          const prompt = `Você é o Cérebro de um Robô Avançado operando Opções Binárias no ativo ${ativo}.
-Sua missão é avaliar MICROPADRÕES e o fluxo de continuidade do mercado com base nos dados abaixo:
+          const prompt = `Você é o Cérebro de um Robô de Opções Binárias operando o ativo ${ativo}.
+Sua missão é evitar "erros grotescos" analisando o contexto rigorosamente.
 
-📊 **CENÁRIO TÉCNICO CALCULADO:**
-- Tendência Macro (EMA 20 no M15): ${tendenciaMacro}
+🧠 **SUA MEMÓRIA DE MERCADO NESTE ATIVO:**
+${comportamentoRecente}
+*Se você estiver com mais erros que acertos, seja EXTREMAMENTE PESSIMISTA e exija um cenário perfeito para aprovar entrada.*
+
+📊 **CENÁRIO TÉCNICO AGORA:**
+- Tendência Macro (M15): ${tendenciaMacro}
 - Indicador RSI (M5): ${rsi5m.toFixed(2)}
 - Ação de Preço Atual (M5): ${padraoMicro}
 
-**REGRAS DE OURO DA IA:**
-1. Procure SEMPRE operar a favor da Tendência Macro. Se M15 for ALTA, prefira COMPRA. Se M15 for BAIXA, prefira VENDA.
-2. Autorize entradas se o "Ação de Preço Atual" indicar força/rejeição a favor da tendência.
-3. Se o movimento estiver violento contra a tendência ou o gráfico confuso, responda "NEUTRO".
+**REGRAS ANTI-LOSS:**
+1. SÓ OPERE A FAVOR DA TENDÊNCIA MACRO. Se M15 é ALTA e o padrão for de BAIXA, aborte (NEUTRO).
+2. Não tente adivinhar topos e fundos apenas com RSI. Só valide reversões se houver um padrão claro de rejeição (Martelo, Engolfo).
+3. Se o cenário for medíocre, diga "NEUTRO". Não force operações.
 
 Responda EXCLUSIVAMENTE em JSON:
-{"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%", "motivo": "Explique em até 15 palavras."}`;
+{"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%", "motivo": "Motivo da escolha em 15 palavras."}`;
 
           const responseGroq = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${GROQ_BOT_KEY}`, 'Content-Type': 'application/json' },
+            method: 'POST', headers: { 'Authorization': `Bearer ${GROQ_BOT_KEY}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({
               model: 'llama-3.3-70b-versatile', 
               messages: [{ role: 'user', content: prompt }],
               response_format: { type: 'json_object' }, 
-              temperature: 0.2 
+              temperature: 0.1 // Temperatura baixíssima para a IA não alucinar e ser estritamente analítica
             })
           });
 
@@ -307,7 +255,7 @@ Responda EXCLUSIVAMENTE em JSON:
           const ia = JSON.parse((await responseGroq.json()).choices[0].message.content.trim());
           const confiancaNumerica = parseInt(ia.confianca_padrao);
 
-          if ((ia.sinal === 'COMPRA' || ia.sinal === 'VENDA') && confiancaNumerica >= 70) {
+          if ((ia.sinal === 'COMPRA' || ia.sinal === 'VENDA') && confiancaNumerica >= 80) { // Aumentado para 80% mínimo
             torneioDeSinais.push({ ativo, ia, precoAtual, rsi: rsi5m, padrao: padraoMicro, confianca: confiancaNumerica });
           }
         }
@@ -317,15 +265,11 @@ Responda EXCLUSIVAMENTE em JSON:
     if (torneioDeSinais.length > 0) {
       torneioDeSinais.sort((a, b) => b.confianca - a.confianca);
       const alvo = torneioDeSinais[0];
-      console.log(`🎯 OPORTUNIDADE ENCONTRADA: ${alvo.ativo} (${alvo.confianca}%) - ${alvo.ia.motivo}`);
       await enviarSinalTelegram(alvo.ativo, alvo.ia, alvo.precoAtual, alvo.rsi, alvo.padrao);
-    } else {
-      console.log("🔎 Varredura finalizada. Nenhum ativo elegível no momento.");
     }
 
-    return NextResponse.json({ success: true, mensagem: `Análise finalizada com sucesso.` });
+    return NextResponse.json({ success: true, mensagem: `Análise finalizada.` });
   } catch (error: any) {
-    console.error("❌ ERRO CRÍTICO NO CRON:", error.message);
-    return NextResponse.json({ error: "Erro interno do servidor" }, { status: 500 });
+    return NextResponse.json({ error: "Erro interno" }, { status: 500 });
   }
 }
