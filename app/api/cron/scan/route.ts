@@ -11,7 +11,7 @@ const getSupabaseClient = () => {
   return createClient(url, key);
 };
 
-// --- FILTRO DE HORÁRIO ---
+// --- FILTRO DE HORÁRIO DE MERCADO ---
 function isMercadoAberto(ticker: string, dataHora: Date) {
   const dia = dataHora.getDay(); 
   const hora = dataHora.getHours();
@@ -41,7 +41,7 @@ function isMercadoAberto(ticker: string, dataHora: Date) {
   return true;
 }
 
-// --- MATEMÁTICA E LEITURA FRACTAL ---
+// --- ANÁLISE DE CANDLES E INDICADORES ---
 function mapearAnatomiaVelas(quote: any, quantidade: number) {
   const blocoVelas = [];
   for (let i = 0; i < quote.close.length; i++) {
@@ -90,7 +90,6 @@ function calcularEMA(velas: any[], periodo: number) {
   return ema;
 }
 
-// PADRÕES DE VELA
 function identificarPadraoCandle(velas: any[]) {
   if (velas.length < 2) return "NENHUM";
   const atual = velas[velas.length - 1];
@@ -117,7 +116,7 @@ function identificarPadraoCandle(velas: any[]) {
   return "VELA_DE_FORCA_NORMAL";
 }
 
-// --- INTEGRAÇÃO TELEGRAM ---
+// --- ENVIO TELEGRAM E REGISTRO BANCO ---
 async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: number, rsi: number, padrao: string) {
   try {
     const supabase = getSupabaseClient();
@@ -135,12 +134,16 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
     const expiracao = new Date(proximaVela);
     expiracao.setMinutes(expiracao.getMinutes() + 5);
 
+    // REGISTRA NO SUPABASE
     const { data: insertData, error: dbError } = await supabase
       .from('historico_operacoes')
       .insert([{ ticker: ativo, sinal: iaData.sinal, taxa_entrada: precoAtual, resultado: 'PENDENTE' }])
       .select('id').single();
 
-    if (dbError || !insertData) return;
+    if (dbError) {
+      console.error("🚨 ERRO CRÍTICO AO SALVAR NO SUPABASE:", dbError.message);
+      return;
+    }
 
     const mensagem = `🤖 *SINAL IA FRACTAL (M5 + M15)* 🤖
 *Ativo:* ${ativoFormatado}
@@ -173,9 +176,9 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
   }
 }
 
-// --- FUNÇÃO PRINCIPAL DO ROBÔ ---
+// --- FUNÇÃO PRINCIPAL DO CRON ---
 export async function GET(request: Request) {
-  console.log("🤖 [CRON FLUXO IA] Acordou! Iniciando varredura ágil...");
+  console.log("🤖 [CRON FLUXO IA] Acordou! Iniciando varredura...");
 
   try {
     const CRON_SECRET = process.env.CRON_SECRET || '17a85b09'; 
@@ -200,18 +203,46 @@ export async function GET(request: Request) {
        return NextResponse.json({ success: true, mensagem: `Mercados fechados no momento.` });
     }
 
+    // TRAVA 1: VERIFICA QUAL FOI O ÚLTIMO ATIVO A ENVIAR SINAL NO SISTEMA INTEIRO
+    const { data: ultimoSinalGeral } = await supabase
+      .from('historico_operacoes')
+      .select('ticker')
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    const ultimoAtivoEnviado = ultimoSinalGeral?.[0]?.ticker || null;
+
     const torneioDeSinais = [];
-    const agora = new Date();
-
-    // DEFINIÇÃO DOS TEMPOS DE ROTAÇÃO (COOLDOWN)
-    const limiteLoss = new Date(agora);
-    limiteLoss.setMinutes(agora.getMinutes() - 60); // 1 hora de geladeira se tomou loss
-
-    const limiteRotacaoGeral = new Date(agora);
-    limiteRotacaoGeral.setMinutes(agora.getMinutes() - 30); // 30 minutos de geladeira mesmo se for Win ou Pendente
+    const agoraMs = Date.now();
 
     for (const ativo of ativosAtivos) {
       try {
+        // REGRA A: NUNCA REPETIR O MESMO ATIVO SEGUIDO
+        if (ultimoAtivoEnviado && ativo === ultimoAtivoEnviado) {
+          console.log(`⛔ [BLOQUEIO CONSECUTIVO] ${ativo} foi o último enviado. Pulando...`);
+          continue;
+        }
+
+        // TRAVA 2: CHECAGEM DE TEMPO (EM MILISSEGUNDOS REAIS NO JAVASCRIPT)
+        const { data: ultimosDoAtivo } = await supabase
+          .from('historico_operacoes')
+          .select('created_at')
+          .eq('ticker', ativo)
+          .order('created_at', { ascending: false })
+          .limit(1);
+
+        if (ultimosDoAtivo && ultimosDoAtivo.length > 0) {
+          const tempoUltimoSinalMs = new Date(ultimosDoAtivo[0].created_at).getTime();
+          const minutosDecorridos = (agoraMs - tempoUltimoSinalMs) / (1000 * 60);
+
+          // SE FOI ENVIADO HÁ MENOS DE 45 MINUTOS, BLOQUEIA TOTALMENTE
+          if (minutosDecorridos < 45) {
+            console.log(`⛔ [COOLDOWN] ${ativo} enviado há apenas ${minutosDecorridos.toFixed(1)} min. Ignorando.`);
+            continue;
+          }
+        }
+
+        // CONSULTA DE MERCADO
         const [res5m, res15m] = await Promise.all([
           fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=5m&range=1d`, { cache: 'no-store' }),
           fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=15m&range=2d`, { cache: 'no-store' })
@@ -247,47 +278,21 @@ export async function GET(request: Request) {
         const rsiOportunidade = rsi5m <= 45 || rsi5m >= 55;
 
         if (temPadrao || rsiOportunidade) {
-          
-          // VERIFICAÇÃO DO SISTEMA DE ROTAÇÃO NO BANCO DE DADOS
-          const { data: ultimoSinalData } = await supabase
-            .from('historico_operacoes')
-            .select('resultado, created_at')
-            .eq('ticker', ativo)
-            .gte('created_at', limiteLoss.toISOString())
-            .order('created_at', { ascending: false })
-            .limit(1);
-
-          if (ultimoSinalData && ultimoSinalData.length > 0) {
-            const ultimoSinal = ultimoSinalData[0];
-            const tempoSinal = new Date(ultimoSinal.created_at).getTime();
-            
-            // Regra 1: Tomou LOSS recente? Fica de fora por 60 minutos.
-            if (ultimoSinal.resultado === 'LOSS') {
-              continue; 
-            }
-            
-            // Regra 2 (Anti-Repetição): Já teve sinal nos últimos 30 min? Fica de fora pra dar vez a outros ativos.
-            if (tempoSinal >= limiteRotacaoGeral.getTime()) {
-              continue;
-            }
-          }
-
           const prompt = `Você é o Cérebro de um Robô Avançado operando Opções Binárias no ativo ${ativo}.
-Sua missão é avaliar MICROPADRÕES e o fluxo de continuidade do mercado, com base nestes dados matemáticos exatos:
+Sua missão é avaliar MICROPADRÕES e o fluxo de continuidade do mercado com base nos dados abaixo:
 
 📊 **CENÁRIO TÉCNICO CALCULADO:**
 - Tendência Macro (EMA 20 no M15): ${tendenciaMacro}
 - Indicador RSI (M5): ${rsi5m.toFixed(2)}
 - Ação de Preço Atual (M5): ${padraoMicro}
 
-**REGRAS DE OURO DA IA (FLUXO FRACTAL):**
-1. ALINHAMENTO DE TENDÊNCIA: Procure SEMPRE operar a favor da Tendência Macro. Se M15 for ALTA, prefira COMPRA. Se M15 for BAIXA, prefira VENDA.
-2. MICROPADRÕES: Você pode e deve autorizar entradas se o "Ação de Preço Atual" indicar um respiro ou força a favor da tendência (Ex: Martelo ou Engolfo surgindo durante uma tendência).
-3. Não exija RSI em extremos se houver um padrão de vela claro confirmando o fluxo de continuidade.
-4. Se o M5 estiver indo violentamente contra o M15 sem sinal de parada, ou se o gráfico estiver confuso, recomende "NEUTRO".
+**REGRAS DE OURO DA IA:**
+1. Procure SEMPRE operar a favor da Tendência Macro. Se M15 for ALTA, prefira COMPRA. Se M15 for BAIXA, prefira VENDA.
+2. Autorize entradas se o "Ação de Preço Atual" indicar força/rejeição a favor da tendência.
+3. Se o movimento estiver violento contra a tendência ou o gráfico confuso, responda "NEUTRO".
 
-Responda EXCLUSIVAMENTE em formato JSON:
-{"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%", "motivo": "Explique em até 15 palavras por que aprovou ou negou."}`;
+Responda EXCLUSIVAMENTE em JSON:
+{"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%", "motivo": "Explique em até 15 palavras."}`;
 
           const responseGroq = await fetch('https://api.groq.com/openai/v1/chat/completions', {
             method: 'POST',
@@ -296,7 +301,7 @@ Responda EXCLUSIVAMENTE em formato JSON:
               model: 'llama-3.3-70b-versatile', 
               messages: [{ role: 'user', content: prompt }],
               response_format: { type: 'json_object' }, 
-              temperature: 0.25 
+              temperature: 0.2 
             })
           });
 
@@ -318,7 +323,7 @@ Responda EXCLUSIVAMENTE em formato JSON:
       console.log(`🎯 OPORTUNIDADE ENCONTRADA: ${alvo.ativo} (${alvo.confianca}%) - ${alvo.ia.motivo}`);
       await enviarSinalTelegram(alvo.ativo, alvo.ia, alvo.precoAtual, alvo.rsi, alvo.padrao);
     } else {
-      console.log("🔎 Varredura finalizada. O mercado não apresentou fluxo favorável nesta rodada.");
+      console.log("🔎 Varredura finalizada. Nenhum ativo elegível no momento.");
     }
 
     return NextResponse.json({ success: true, mensagem: `Análise finalizada com sucesso.` });
