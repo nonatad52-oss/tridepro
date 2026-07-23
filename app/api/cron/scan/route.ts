@@ -4,7 +4,6 @@ import { createClient } from '@supabase/supabase-js';
 export const maxDuration = 60; 
 export const dynamic = 'force-dynamic';
 
-// --- CONFIGURAÇÃO SUPABASE ---
 const getSupabaseClient = () => {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
   const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY;
@@ -12,7 +11,7 @@ const getSupabaseClient = () => {
   return createClient(url, key);
 };
 
-// --- FUNÇÕES MATEMÁTICAS E DE MERCADO ---
+// --- FILTRO DE HORÁRIO ---
 function isMercadoAberto(ticker: string, dataHora: Date) {
   const dia = dataHora.getDay(); 
   const hora = dataHora.getHours();
@@ -42,6 +41,7 @@ function isMercadoAberto(ticker: string, dataHora: Date) {
   return true;
 }
 
+// --- MATEMÁTICA E LEITURA FRACTAL ---
 function mapearAnatomiaVelas(quote: any, quantidade: number) {
   const blocoVelas = [];
   for (let i = 0; i < quote.close.length; i++) {
@@ -90,6 +90,7 @@ function calcularEMA(velas: any[], periodo: number) {
   return ema;
 }
 
+// PADRÕES DE VELA MAIS FLEXÍVEIS PARA NÃO PERDER OPORTUNIDADES
 function identificarPadraoCandle(velas: any[]) {
   if (velas.length < 2) return "NENHUM";
   const atual = velas[velas.length - 1];
@@ -97,19 +98,26 @@ function identificarPadraoCandle(velas: any[]) {
   const corpoAtual = atual.corpo;
   const tamanhoTotalAtual = atual.maxima - atual.minima;
   
-  if (anterior.direcao === "BAIXA" && atual.direcao === "ALTA" && atual.fechamento > anterior.abertura && atual.abertura < anterior.fechamento) {
+  // Doji / Empate (Sinal de exaustão de um movimento)
+  if (corpoAtual < (tamanhoTotalAtual * 0.20)) return "DOJI_EXAUSTAO";
+
+  // Engolfo Flexível (Cobre o corpo anterior)
+  if (anterior.direcao === "BAIXA" && atual.direcao === "ALTA" && atual.fechamento > anterior.abertura) {
     return "ENGOLFO_DE_ALTA";
   }
-  if (anterior.direcao === "ALTA" && atual.direcao === "BAIXA" && atual.fechamento < anterior.abertura && atual.abertura > anterior.fechamento) {
+  if (anterior.direcao === "ALTA" && atual.direcao === "BAIXA" && atual.fechamento < anterior.abertura) {
     return "ENGOLFO_DE_BAIXA";
   }
-  if (atual.pavio_inf > corpoAtual * 2 && atual.pavio_sup < corpoAtual * 0.5 && tamanhoTotalAtual > 0) {
+  
+  // Pinbars (Martelos/Estrelas) com tolerância de respiro
+  if (atual.pavio_inf > corpoAtual * 1.5 && atual.pavio_sup <= corpoAtual * 0.8) {
     return "MARTELO_REJEICAO_BAIXA";
   }
-  if (atual.pavio_sup > corpoAtual * 2 && atual.pavio_inf < corpoAtual * 0.5 && tamanhoTotalAtual > 0) {
+  if (atual.pavio_sup > corpoAtual * 1.5 && atual.pavio_inf <= corpoAtual * 0.8) {
     return "ESTRELA_CADENTE_REJEICAO_ALTA";
   }
-  return "VELA_NORMAL";
+  
+  return "VELA_DE_FORCA_NORMAL";
 }
 
 // --- INTEGRAÇÃO TELEGRAM ---
@@ -137,14 +145,14 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
 
     if (dbError || !insertData) return;
 
-    const mensagem = `🏆 *SINAL SNIPER (M5 + M15)* 🏆
+    const mensagem = `🤖 *SINAL IA FRACTAL (M5 + M15)* 🤖
 *Ativo:* ${ativoFormatado}
 *Ação:* ${iaData.sinal === 'COMPRA' ? '🟢 COMPRA' : '🔴 VENDA'}
 ⏰ *Entrada:* ${formatadorHora.format(proximaVela)}
 ⏳ *Expiração:* ${formatadorHora.format(expiracao)}
 
-📊 *Gatilho Técnico:* ${padrao.replace(/_/g, ' ')}
-🔥 *RSI:* ${rsi.toFixed(2)}
+📊 *Gatilho:* ${padrao.replace(/_/g, ' ')}
+🔥 *RSI M5:* ${rsi.toFixed(2)}
 🧠 *Análise IA:* ${iaData.motivo}
 🎯 *Confiança:* ${iaData.confianca_padrao}`;
     
@@ -170,7 +178,7 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
 
 // --- FUNÇÃO PRINCIPAL DO ROBÔ ---
 export async function GET(request: Request) {
-  console.log("🤖 [CRON SNIPER] Acordou! Verificando bolsas abertas...");
+  console.log("🤖 [CRON FLUXO IA] Acordou! Iniciando varredura ágil...");
 
   try {
     const CRON_SECRET = process.env.CRON_SECRET || '17a85b09'; 
@@ -187,16 +195,15 @@ export async function GET(request: Request) {
     
     let ativosBrutos = ativosDB.map(a => a.ticker).filter(a => !a.toUpperCase().includes('OTC'));
     
-    // 1. Filtro de Horário de Mercado
     const horaSP = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
     let ativosAtivos = ativosBrutos.filter(ativo => isMercadoAberto(ativo, horaSP));
 
     if (ativosAtivos.length === 0) {
-       console.log("💤 Todas as bolsas monitoradas estão fechadas agora.");
+       console.log("💤 Mercados fechados no momento.");
        return NextResponse.json({ success: true, mensagem: `Mercados fechados no momento.` });
     }
 
-    console.log(`📊 Rastreador ativo em ${ativosAtivos.length} mercados abertos neste momento...`);
+    console.log(`📊 Rastreador ativo em ${ativosAtivos.length} mercados...`);
 
     const torneioDeSinais = [];
     const agora = new Date();
@@ -241,10 +248,11 @@ export async function GET(request: Request) {
           else if (velas15m[velas15m.length - 1].fechamento < ema20_M15) tendenciaMacro = "BAIXA";
         }
 
-        const exaustaoCompra = rsi5m <= 35 && padraoMicro.includes("ALTA");
-        const exaustaoVenda = rsi5m >= 65 && padraoMicro.includes("BAIXA");
+        // GATILHO AMPLIADO: Desperta a IA se houver padrão de preço OU RSI dando oportunidade
+        const temPadrao = padraoMicro !== "VELA_DE_FORCA_NORMAL" && padraoMicro !== "NENHUM";
+        const rsiOportunidade = rsi5m <= 45 || rsi5m >= 55;
 
-        if (exaustaoCompra || exaustaoVenda || padraoMicro !== "VELA_NORMAL") {
+        if (temPadrao || rsiOportunidade) {
           
           const { data: ultimoSinalData } = await supabase
             .from('historico_operacoes')
@@ -258,28 +266,25 @@ export async function GET(request: Request) {
             const ultimoSinal = ultimoSinalData[0];
             const tempoDoUltimoSinal = new Date(ultimoSinal.created_at).getTime();
             if (tempoDoUltimoSinal >= inicioVelaAtual.getTime()) continue; 
-            if (ultimoSinal.resultado === 'LOSS') {
-              console.log(`⏸️ [PAUSA] ${ativo} ignorado (LOSS recente em menos de 1h).`);
-              continue; 
-            }
+            if (ultimoSinal.resultado === 'LOSS') continue; // Mantém a defesa contra loss
           }
 
-          const prompt = `Você é o Juiz de um Robô Quantitativo operando Opções Binárias no ativo ${ativo}.
-Sua missão é emitir um veredito baseado EXCLUSIVAMENTE nos dados abaixo.
+          const prompt = `Você é o Cérebro de um Robô Avançado operando Opções Binárias no ativo ${ativo}.
+Sua missão é avaliar MICROPADRÕES e o fluxo de continuidade do mercado, com base nestes dados matemáticos exatos:
 
-📊 **CENÁRIO TÉCNICO:**
-- Tendência (EMA 20 no M15): ${tendenciaMacro}
-- Indicador RSI (M5): ${rsi5m.toFixed(2)} (${rsi5m > 65 ? 'SOBRECOMPRADO' : rsi5m < 35 ? 'SOBREVENDIDO' : 'NEUTRO'})
-- Price Action (M5): ${padraoMicro}
+📊 **CENÁRIO TÉCNICO CALCULADO:**
+- Tendência Macro (EMA 20 no M15): ${tendenciaMacro}
+- Indicador RSI (M5): ${rsi5m.toFixed(2)}
+- Ação de Preço Atual (M5): ${padraoMicro}
 
-**REGRAS INQUEBRÁVEIS:**
-1. Se a Tendência Macro for ALTA, NUNCA recomende VENDA.
-2. Se a Tendência Macro for BAIXA, NUNCA recomende COMPRA.
-3. Se os dados forem conflitantes, o sinal deve ser "NEUTRO".
-4. Confiança só deve ser maior que 70% se a tendência, o RSI e o padrão apontarem para a mesma direção de forma clara.
+**REGRAS DE OURO DA IA (FLUXO FRACTAL):**
+1. ALINHAMENTO DE TENDÊNCIA: Procure SEMPRE operar a favor da Tendência Macro. Se M15 for ALTA, prefira COMPRA. Se M15 for BAIXA, prefira VENDA.
+2. MICROPADRÕES: Você pode e deve autorizar entradas se o "Ação de Preço Atual" indicar um respiro ou força a favor da tendência (Ex: Martelo ou Engolfo surgindo durante uma tendência).
+3. Não exija RSI em extremos se houver um padrão de vela claro confirmando o fluxo de continuidade.
+4. Se o M5 estiver indo violentamente contra o M15 sem sinal de parada, ou se o gráfico estiver confuso, recomende "NEUTRO".
 
 Responda EXCLUSIVAMENTE em formato JSON:
-{"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%", "motivo": "Explicação técnica de no máximo 15 palavras."}`;
+{"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%", "motivo": "Explique em até 15 palavras por que aprovou ou negou."}`;
 
           const responseGroq = await fetch('https://api.groq.com/openai/v1/chat/completions', {
             method: 'POST',
@@ -288,7 +293,7 @@ Responda EXCLUSIVAMENTE em formato JSON:
               model: 'llama-3.3-70b-versatile', 
               messages: [{ role: 'user', content: prompt }],
               response_format: { type: 'json_object' }, 
-              temperature: 0.1 
+              temperature: 0.25 // Aumentado um pouco para a IA raciocinar melhor os padrões
             })
           });
 
@@ -307,10 +312,10 @@ Responda EXCLUSIVAMENTE em formato JSON:
     if (torneioDeSinais.length > 0) {
       torneioDeSinais.sort((a, b) => b.confianca - a.confianca);
       const alvo = torneioDeSinais[0];
-      console.log(`🎯 TIRO SNIPER: ${alvo.ativo} (${alvo.confianca}%) - Motivo: ${alvo.ia.motivo}`);
+      console.log(`🎯 OPORTUNIDADE ENCONTRADA: ${alvo.ativo} (${alvo.confianca}%) - ${alvo.ia.motivo}`);
       await enviarSinalTelegram(alvo.ativo, alvo.ia, alvo.precoAtual, alvo.rsi, alvo.padrao);
     } else {
-      console.log("🔎 Varredura finalizada. Nenhum ativo atendeu a todos os critérios operacionais simultaneamente.");
+      console.log("🔎 Varredura finalizada. O mercado não apresentou fluxo favorável nesta rodada.");
     }
 
     return NextResponse.json({ success: true, mensagem: `Análise finalizada com sucesso.` });
