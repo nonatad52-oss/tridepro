@@ -134,7 +134,7 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
 }
 
 export async function GET(request: Request) {
-  console.log("🤖 Iniciando varredura com Motor de Aprendizado...");
+  console.log("🤖 Iniciando varredura com Motor de Aprendizado Balanceado...");
 
   try {
     const CRON_SECRET = process.env.CRON_SECRET || '17a85b09'; 
@@ -156,7 +156,6 @@ export async function GET(request: Request) {
     for (const ativo of ativosAtivos) {
       try {
         // --- 1. MEMÓRIA DE MERCADO (O APRENDIZADO DA IA) ---
-        // Puxamos as últimas 10 operações reais deste ativo no banco de dados para a IA saber como ela está performando
         const { data: historicoRecente } = await supabase
           .from('historico_operacoes')
           .select('resultado, sinal, created_at')
@@ -165,18 +164,19 @@ export async function GET(request: Request) {
           .limit(10);
 
         let wins = 0; let losses = 0;
-        let comportamentoRecente = "Sem dados suficientes.";
+        let comportamentoRecente = "Sem dados suficientes na sessão atual.";
 
         if (historicoRecente && historicoRecente.length > 0) {
-          // Bloqueio severo de 45 min se teve LOSS nas últimas 4 operações
           const teveLossRecente = historicoRecente.slice(0, 4).some(op => {
             const minDecorridos = (agoraMs - new Date(op.created_at).getTime()) / (1000 * 60);
             return op.resultado === 'LOSS' && minDecorridos < 45;
           });
           
-          if (teveLossRecente) continue; // Pula o ativo se estiver em cooldown
+          if (teveLossRecente) {
+             console.log(`⛔ [BLOQUEADO] ${ativo} rejeitado: Em período de resfriamento após LOSS.`);
+             continue; 
+          }
 
-          // Estatísticas para ensinar a IA
           historicoRecente.forEach(op => {
             if (op.resultado === 'WIN') wins++;
             if (op.resultado === 'LOSS') losses++;
@@ -215,27 +215,26 @@ export async function GET(request: Request) {
           else if (velas15m[velas15m.length - 1].fechamento < ema20_M15) tendenciaMacro = "BAIXA";
         }
 
-        // --- 3. PROMPT CONSCIENTE (A IA AGORA SABE SE ESTÁ ERRANDO) ---
+        // --- 3. PROMPT CONSCIENTE E EQUILIBRADO ---
         const temPadrao = padraoMicro !== "VELA_DE_FORCA_NORMAL" && padraoMicro !== "NENHUM";
         const rsiOportunidade = rsi5m <= 45 || rsi5m >= 55;
 
         if (temPadrao || rsiOportunidade) {
           const prompt = `Você é o Cérebro de um Robô de Opções Binárias operando o ativo ${ativo}.
-Sua missão é evitar "erros grotescos" analisando o contexto rigorosamente.
 
 🧠 **SUA MEMÓRIA DE MERCADO NESTE ATIVO:**
 ${comportamentoRecente}
-*Se você estiver com mais erros que acertos, seja EXTREMAMENTE PESSIMISTA e exija um cenário perfeito para aprovar entrada.*
+*Se o histórico estiver ruim, seja cauteloso, mas NÃO deixe passar oportunidades claras que estejam a favor da tendência.*
 
 📊 **CENÁRIO TÉCNICO AGORA:**
 - Tendência Macro (M15): ${tendenciaMacro}
 - Indicador RSI (M5): ${rsi5m.toFixed(2)}
 - Ação de Preço Atual (M5): ${padraoMicro}
 
-**REGRAS ANTI-LOSS:**
-1. SÓ OPERE A FAVOR DA TENDÊNCIA MACRO. Se M15 é ALTA e o padrão for de BAIXA, aborte (NEUTRO).
-2. Não tente adivinhar topos e fundos apenas com RSI. Só valide reversões se houver um padrão claro de rejeição (Martelo, Engolfo).
-3. Se o cenário for medíocre, diga "NEUTRO". Não force operações.
+**REGRAS DE OPERAÇÃO:**
+1. A prioridade é operar a favor da Tendência Macro.
+2. Padrões de reversão (Martelo, Engolfo) aliados a um RSI favorável são gatilhos fortes.
+3. Se não houver clareza no movimento, responda "NEUTRO".
 
 Responda EXCLUSIVAMENTE em JSON:
 {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%", "motivo": "Motivo da escolha em 15 palavras."}`;
@@ -246,7 +245,7 @@ Responda EXCLUSIVAMENTE em JSON:
               model: 'llama-3.3-70b-versatile', 
               messages: [{ role: 'user', content: prompt }],
               response_format: { type: 'json_object' }, 
-              temperature: 0.1 // Temperatura baixíssima para a IA não alucinar e ser estritamente analítica
+              temperature: 0.2 // Temperatura ajustada para permitir maior identificação de padrões
             })
           });
 
@@ -255,9 +254,18 @@ Responda EXCLUSIVAMENTE em JSON:
           const ia = JSON.parse((await responseGroq.json()).choices[0].message.content.trim());
           const confiancaNumerica = parseInt(ia.confianca_padrao);
 
-          if ((ia.sinal === 'COMPRA' || ia.sinal === 'VENDA') && confiancaNumerica >= 80) { // Aumentado para 80% mínimo
-            torneioDeSinais.push({ ativo, ia, precoAtual, rsi: rsi5m, padrao: padraoMicro, confianca: confiancaNumerica });
+          if ((ia.sinal === 'COMPRA' || ia.sinal === 'VENDA')) {
+             if (confiancaNumerica >= 70) {
+                 torneioDeSinais.push({ ativo, ia, precoAtual, rsi: rsi5m, padrao: padraoMicro, confianca: confiancaNumerica });
+                 console.log(`✅ [APROVADO] ${ativo}: Sinal de ${ia.sinal} com ${confiancaNumerica}% de confiança. Motivo: ${ia.motivo}`);
+             } else {
+                 console.log(`⚠️ [DESCARTADO] ${ativo}: A IA sugeriu ${ia.sinal}, mas a confiança (${confiancaNumerica}%) foi menor que os 70% exigidos. Motivo: ${ia.motivo}`);
+             }
+          } else {
+             console.log(`ℹ️ [NEUTRO] ${ativo}: A IA preferiu não operar agora. Motivo: ${ia.motivo}`);
           }
+        } else {
+           console.log(`🔎 [SEM GATILHO] ${ativo}: Gráfico sem padrões claros ou RSI neutro no momento.`);
         }
       } catch (e: any) { continue; }
     }
@@ -266,6 +274,8 @@ Responda EXCLUSIVAMENTE em JSON:
       torneioDeSinais.sort((a, b) => b.confianca - a.confianca);
       const alvo = torneioDeSinais[0];
       await enviarSinalTelegram(alvo.ativo, alvo.ia, alvo.precoAtual, alvo.rsi, alvo.padrao);
+    } else {
+      console.log("🏁 Fim da varredura: Nenhum sinal atingiu o critério de qualidade nesta rodada.");
     }
 
     return NextResponse.json({ success: true, mensagem: `Análise finalizada.` });
