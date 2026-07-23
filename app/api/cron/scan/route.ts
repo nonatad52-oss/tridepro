@@ -90,7 +90,7 @@ function calcularEMA(velas: any[], periodo: number) {
   return ema;
 }
 
-// PADRÕES DE VELA MAIS FLEXÍVEIS PARA NÃO PERDER OPORTUNIDADES
+// PADRÕES DE VELA
 function identificarPadraoCandle(velas: any[]) {
   if (velas.length < 2) return "NENHUM";
   const atual = velas[velas.length - 1];
@@ -98,10 +98,8 @@ function identificarPadraoCandle(velas: any[]) {
   const corpoAtual = atual.corpo;
   const tamanhoTotalAtual = atual.maxima - atual.minima;
   
-  // Doji / Empate (Sinal de exaustão de um movimento)
   if (corpoAtual < (tamanhoTotalAtual * 0.20)) return "DOJI_EXAUSTAO";
 
-  // Engolfo Flexível (Cobre o corpo anterior)
   if (anterior.direcao === "BAIXA" && atual.direcao === "ALTA" && atual.fechamento > anterior.abertura) {
     return "ENGOLFO_DE_ALTA";
   }
@@ -109,7 +107,6 @@ function identificarPadraoCandle(velas: any[]) {
     return "ENGOLFO_DE_BAIXA";
   }
   
-  // Pinbars (Martelos/Estrelas) com tolerância de respiro
   if (atual.pavio_inf > corpoAtual * 1.5 && atual.pavio_sup <= corpoAtual * 0.8) {
     return "MARTELO_REJEICAO_BAIXA";
   }
@@ -203,17 +200,15 @@ export async function GET(request: Request) {
        return NextResponse.json({ success: true, mensagem: `Mercados fechados no momento.` });
     }
 
-    console.log(`📊 Rastreador ativo em ${ativosAtivos.length} mercados...`);
-
     const torneioDeSinais = [];
     const agora = new Date();
-    const inicioVelaAtual = new Date(agora);
-    inicioVelaAtual.setMinutes(agora.getMinutes() - (agora.getMinutes() % 5));
-    inicioVelaAtual.setSeconds(0); inicioVelaAtual.setMilliseconds(0);
 
-    const bloqueioTempo = new Date(agora);
-    bloqueioTempo.setMinutes(agora.getMinutes() - 60);
-    const cooldownISO = bloqueioTempo.toISOString();
+    // DEFINIÇÃO DOS TEMPOS DE ROTAÇÃO (COOLDOWN)
+    const limiteLoss = new Date(agora);
+    limiteLoss.setMinutes(agora.getMinutes() - 60); // 1 hora de geladeira se tomou loss
+
+    const limiteRotacaoGeral = new Date(agora);
+    limiteRotacaoGeral.setMinutes(agora.getMinutes() - 30); // 30 minutos de geladeira mesmo se for Win ou Pendente
 
     for (const ativo of ativosAtivos) {
       try {
@@ -248,25 +243,33 @@ export async function GET(request: Request) {
           else if (velas15m[velas15m.length - 1].fechamento < ema20_M15) tendenciaMacro = "BAIXA";
         }
 
-        // GATILHO AMPLIADO: Desperta a IA se houver padrão de preço OU RSI dando oportunidade
         const temPadrao = padraoMicro !== "VELA_DE_FORCA_NORMAL" && padraoMicro !== "NENHUM";
         const rsiOportunidade = rsi5m <= 45 || rsi5m >= 55;
 
         if (temPadrao || rsiOportunidade) {
           
+          // VERIFICAÇÃO DO SISTEMA DE ROTAÇÃO NO BANCO DE DADOS
           const { data: ultimoSinalData } = await supabase
             .from('historico_operacoes')
             .select('resultado, created_at')
             .eq('ticker', ativo)
-            .gte('created_at', cooldownISO)
+            .gte('created_at', limiteLoss.toISOString())
             .order('created_at', { ascending: false })
             .limit(1);
 
           if (ultimoSinalData && ultimoSinalData.length > 0) {
             const ultimoSinal = ultimoSinalData[0];
-            const tempoDoUltimoSinal = new Date(ultimoSinal.created_at).getTime();
-            if (tempoDoUltimoSinal >= inicioVelaAtual.getTime()) continue; 
-            if (ultimoSinal.resultado === 'LOSS') continue; // Mantém a defesa contra loss
+            const tempoSinal = new Date(ultimoSinal.created_at).getTime();
+            
+            // Regra 1: Tomou LOSS recente? Fica de fora por 60 minutos.
+            if (ultimoSinal.resultado === 'LOSS') {
+              continue; 
+            }
+            
+            // Regra 2 (Anti-Repetição): Já teve sinal nos últimos 30 min? Fica de fora pra dar vez a outros ativos.
+            if (tempoSinal >= limiteRotacaoGeral.getTime()) {
+              continue;
+            }
           }
 
           const prompt = `Você é o Cérebro de um Robô Avançado operando Opções Binárias no ativo ${ativo}.
@@ -293,7 +296,7 @@ Responda EXCLUSIVAMENTE em formato JSON:
               model: 'llama-3.3-70b-versatile', 
               messages: [{ role: 'user', content: prompt }],
               response_format: { type: 'json_object' }, 
-              temperature: 0.25 // Aumentado um pouco para a IA raciocinar melhor os padrões
+              temperature: 0.25 
             })
           });
 
