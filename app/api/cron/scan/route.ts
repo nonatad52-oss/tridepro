@@ -208,33 +208,35 @@ export async function GET(request: Request) {
 
     for (const ativo of ativosAtivos) {
       try {
-        // TRAVA PRINCIPAL: AVALIA RESULTADO DO ÚLTIMO SINAL DESTE ATIVO
+        // TRAVA PRINCIPAL CORRIGIDA: Puxa as últimas 4 operações para evitar que o LOSS seja "enterrado"
         const { data: ultimosDoAtivo } = await supabase
           .from('historico_operacoes')
           .select('created_at, resultado')
           .eq('ticker', ativo)
           .order('created_at', { ascending: false })
-          .limit(1);
+          .limit(4);
 
         if (ultimosDoAtivo && ultimosDoAtivo.length > 0) {
-          const ultimoSinal = ultimosDoAtivo[0];
-          const tempoUltimoSinalMs = new Date(ultimoSinal.created_at).getTime();
-          const minutosDecorridos = (agoraMs - tempoUltimoSinalMs) / (1000 * 60);
+          const ultimoSinalAbsoluto = ultimosDoAtivo[0];
+          const tempoUltimoMs = new Date(ultimoSinalAbsoluto.created_at).getTime();
+          const minutosDesdeOUltimo = (agoraMs - tempoUltimoMs) / (1000 * 60);
 
           // 1. Evita sobrepor sinais no mesmo candle (espera no mínimo 5 minutos)
-          if (minutosDecorridos < 5) {
+          if (minutosDesdeOUltimo < 5) {
             console.log(`⏳ [AGUARDANDO EXPIRAÇÃO] ${ativo} operando agora. Aguardando...`);
             continue;
           }
 
-          // 2. REGRA DO LOSS: Se a última operação foi LOSS, bloqueia por 45 minutos.
-          if (ultimoSinal.resultado === 'LOSS') {
-            if (minutosDecorridos < 45) {
-              console.log(`⛔ [LOSS COOLDOWN] ${ativo} deu LOSS. Pausado por 45 min (${minutosDecorridos.toFixed(1)}m decorridos).`);
-              continue;
-            }
+          // 2. NOVA REGRA DO LOSS: Verifica se ALGUMA das últimas operações recentes (45 min) deu LOSS
+          const teveLossRecente = ultimosDoAtivo.some(op => {
+            const minDecorridosOp = (agoraMs - new Date(op.created_at).getTime()) / (1000 * 60);
+            return op.resultado === 'LOSS' && minDecorridosOp < 45;
+          });
+
+          if (teveLossRecente) {
+            console.log(`⛔ [LOSS COOLDOWN] ${ativo} tomou um LOSS recente. Ignorando pelo resto dos 45 min.`);
+            continue; // Pula este ativo!
           }
-          // Se for WIN ou PENDENTE (após 5 minutos), ele continua livremente!
         }
 
         // CONSULTA DE MERCADO
