@@ -203,43 +203,38 @@ export async function GET(request: Request) {
        return NextResponse.json({ success: true, mensagem: `Mercados fechados no momento.` });
     }
 
-    // TRAVA 1: VERIFICA QUAL FOI O ÚLTIMO ATIVO A ENVIAR SINAL NO SISTEMA INTEIRO
-    const { data: ultimoSinalGeral } = await supabase
-      .from('historico_operacoes')
-      .select('ticker')
-      .order('created_at', { ascending: false })
-      .limit(1);
-
-    const ultimoAtivoEnviado = ultimoSinalGeral?.[0]?.ticker || null;
-
     const torneioDeSinais = [];
     const agoraMs = Date.now();
 
     for (const ativo of ativosAtivos) {
       try {
-        // REGRA A: NUNCA REPETIR O MESMO ATIVO SEGUIDO
-        if (ultimoAtivoEnviado && ativo === ultimoAtivoEnviado) {
-          console.log(`⛔ [BLOQUEIO CONSECUTIVO] ${ativo} foi o último enviado. Pulando...`);
-          continue;
-        }
-
-        // TRAVA 2: CHECAGEM DE TEMPO (EM MILISSEGUNDOS REAIS NO JAVASCRIPT)
+        // TRAVA PRINCIPAL: AVALIA RESULTADO DO ÚLTIMO SINAL DESTE ATIVO
         const { data: ultimosDoAtivo } = await supabase
           .from('historico_operacoes')
-          .select('created_at')
+          .select('created_at, resultado')
           .eq('ticker', ativo)
           .order('created_at', { ascending: false })
           .limit(1);
 
         if (ultimosDoAtivo && ultimosDoAtivo.length > 0) {
-          const tempoUltimoSinalMs = new Date(ultimosDoAtivo[0].created_at).getTime();
+          const ultimoSinal = ultimosDoAtivo[0];
+          const tempoUltimoSinalMs = new Date(ultimoSinal.created_at).getTime();
           const minutosDecorridos = (agoraMs - tempoUltimoSinalMs) / (1000 * 60);
 
-          // SE FOI ENVIADO HÁ MENOS DE 45 MINUTOS, BLOQUEIA TOTALMENTE
-          if (minutosDecorridos < 45) {
-            console.log(`⛔ [COOLDOWN] ${ativo} enviado há apenas ${minutosDecorridos.toFixed(1)} min. Ignorando.`);
+          // 1. Evita sobrepor sinais no mesmo candle (espera no mínimo 5 minutos)
+          if (minutosDecorridos < 5) {
+            console.log(`⏳ [AGUARDANDO EXPIRAÇÃO] ${ativo} operando agora. Aguardando...`);
             continue;
           }
+
+          // 2. REGRA DO LOSS: Se a última operação foi LOSS, bloqueia por 45 minutos.
+          if (ultimoSinal.resultado === 'LOSS') {
+            if (minutosDecorridos < 45) {
+              console.log(`⛔ [LOSS COOLDOWN] ${ativo} deu LOSS. Pausado por 45 min (${minutosDecorridos.toFixed(1)}m decorridos).`);
+              continue;
+            }
+          }
+          // Se for WIN ou PENDENTE (após 5 minutos), ele continua livremente!
         }
 
         // CONSULTA DE MERCADO
