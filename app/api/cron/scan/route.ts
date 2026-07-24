@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
-// --- DESTRUIDORES DE CACHE (Força o sistema a ler o banco de dados em tempo real) ---
+// --- DESTRUIDORES DE CACHE ---
 export const maxDuration = 60; 
 export const dynamic = 'force-dynamic';
 export const fetchCache = 'force-no-store';
@@ -85,7 +85,7 @@ function identificarPadraoCandle(velas: any[]) {
   return "VELA_DE_FORCA_NORMAL";
 }
 
-// --- ENVIO TELEGRAM COM PROTEÇÃO DE INSERÇÃO ---
+// --- ENVIO TELEGRAM ---
 async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: number, rsi: number, padrao: string, stats: any) {
   try {
     const supabase = getSupabaseClient();
@@ -100,37 +100,30 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
     proximaVela.setSeconds(0); proximaVela.setMilliseconds(0);
     const expiracao = new Date(proximaVela); expiracao.setMinutes(expiracao.getMinutes() + 5);
 
-    // Tenta salvar o sinal PENDENTE no banco
     const { data: insertData, error: insertError } = await supabase.from('historico_operacoes')
       .insert([{ ticker: ativo, sinal: iaData.sinal, taxa_entrada: precoAtual, resultado: 'PENDENTE' }])
       .select('id').single();
 
-    // EXIBE ERRO E BLOQUEIA ENVIO SE O BANCO DE DADOS RECUSAR A GRAVAÇÃO
-    if (insertError) {
-      console.error(`❌ ALERTA CRÍTICO: O Supabase bloqueou a gravação de ${ativo}! O bot abortou o sinal para não gerar repetição. Erro:`, insertError.message);
-      return; 
-    }
-
+    if (insertError) return; 
     if (!insertData) return;
 
     let iconeDesempenho = "📊";
-    if (stats.taxaAcerto >= 70) iconeDesempenho = "🏆";
+    if (stats.taxaAcerto >= 65) iconeDesempenho = "🏆";
     else if (stats.taxaAcerto <= 45 && stats.totalOps > 0) iconeDesempenho = "⚠️";
 
-    const mensagem = `🤖 *SINAL IA - INTELIGÊNCIA SUPREMA* 🤖
+    const mensagem = `🤖 *SINAL IA - INTELIGÊNCIA AGRESSIVA* 🤖
 *Ativo:* ${ativoFormatado}
 *Ação:* ${iaData.sinal === 'COMPRA' ? '🟢 COMPRA' : '🔴 VENDA'}
 ⏰ *Entrada:* ${formatadorHora.format(proximaVela)}
 ⏳ *Expiração:* ${formatadorHora.format(expiracao)}
 
 ${iconeDesempenho} *Placar Geral do Ativo:*
-*Total de Operações:* ${stats.totalOps}
-*Acertos:* ${stats.taxaAcerto}% (${stats.wins} W / ${stats.losses} L)
+*Operações:* ${stats.totalOps} | *Acertos:* ${stats.taxaAcerto}% (${stats.wins}W / ${stats.losses}L)
 
 📊 *Gatilho Identificado:* ${padrao.replace(/_/g, ' ')}
 🔥 *RSI (Força):* ${rsi.toFixed(2)}
 🧠 *Mapeamento IA:* ${iaData.motivo}
-🎯 *Confiança Padrão:* ${iaData.confianca_padrao}`;
+🎯 *Confiança:* ${iaData.confianca_padrao}`;
     
     await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -144,11 +137,11 @@ ${iconeDesempenho} *Placar Geral do Ativo:*
         } 
       }),
     });
-  } catch (error: any) { console.error("Erro no envio:", error.message); }
+  } catch (error: any) {}
 }
 
 export async function GET(request: Request) {
-  console.log("🤖 Iniciando varredura com Inteligência Suprema de Padrões e Anti-Cache...");
+  console.log("🤖 Iniciando varredura com Inteligência Agressiva e Anti-Cache...");
 
   try {
     const CRON_SECRET = process.env.CRON_SECRET || '17a85b09'; 
@@ -185,7 +178,7 @@ export async function GET(request: Request) {
         const totalResolvido = wins + losses;
         const taxaAcertoAtual = totalResolvido > 0 ? Math.round((wins / totalResolvido) * 100) : 0;
 
-        // --- 2. TRAVAS TEMPORAIS BLINDADAS ---
+        // --- 2. TRAVAS TEMPORAIS (Mantidas para segurança) ---
         const { data: ultimasOps } = await supabase
           .from('historico_operacoes')
           .select('resultado, created_at')
@@ -201,14 +194,8 @@ export async function GET(request: Request) {
           const tempoOpDB = new Date(ultimaOp.created_at).getTime();
           const minDecorridos = (agoraUtcMs - tempoOpDB) / (1000 * 60);
 
-          if (minDecorridos < 10) {
-             console.log(`⏳ [BLOQUEIO ANTI-SPAM] ${ativo}: Sinal recente (${Math.round(minDecorridos)} min atrás).`);
-             bloqueado = true;
-          }
-          else if (ultimaOp.resultado === 'LOSS' && minDecorridos < 25) {
-             console.log(`⛔ [CASTIGO APÓS LOSS] ${ativo}: Resfriando ativo após erro recente.`);
-             bloqueado = true;
-          }
+          if (minDecorridos < 10) bloqueado = true; // Anti-Spam (10 min)
+          else if (ultimaOp.resultado === 'LOSS' && minDecorridos < 25) bloqueado = true; // Anti-Teimosia (25 min)
 
           sequenciaRecente = ultimasOps.map(op => op.resultado).join(" -> ");
         }
@@ -249,53 +236,49 @@ export async function GET(request: Request) {
           else if (velas15m[velas15m.length - 1].fechamento < ema20_M15) tendenciaMacro = "BAIXA";
         }
 
-        // --- 4. PROMPT: MATRIZ DE RECONHECIMENTO DE PADRÕES ---
-        const temPadrao = padraoMicro !== "VELA_DE_FORCA_NORMAL" && padraoMicro !== "NENHUM";
-        const rsiOportunidade = rsi5m <= 48 || rsi5m >= 52; 
+        // --- 4. PROMPT: MATRIZ AGRESSIVA E OPORTUNISTA ---
+        const prompt = `Você é o Cérebro de uma IA de Alta Frequência operando ${ativo}.
+Sua missão: Identificar boas oportunidades no fluxo do preço. Seja inteligente, mas não tenha medo de operar. Agressividade calculada é o foco.
 
-        if (temPadrao || rsiOportunidade) {
-          const prompt = `Você é o Cérebro de uma IA de Alta Frequência operando ${ativo}.
-Sua missão: Identificar padrões repetitivos e operar com "Inteligência Suprema" — seja agressivo quando houver confluência técnica, mas rejeite implacavelmente padrões fracos se o histórico deste ativo estiver ruim.
+🧠 **DADOS DO ATIVO:**
+- Placar: ${taxaAcertoAtual}% (${wins} Wins / ${losses} Losses)
+- Últimos Resultados: ${sequenciaRecente}
 
-🧠 **DADOS DE APRENDIZADO DESTE ATIVO:**
-- Taxa de Acerto Histórica: ${taxaAcertoAtual}% (${wins} Wins / ${losses} Losses)
-- Resultados das últimas operações (Mais recente primeiro): ${sequenciaRecente}
-
-📊 **MAPEAMENTO TÉCNICO ATUAL:**
+📊 **MAPEAMENTO TÉCNICO:**
 - Tendência Macro (M15): ${tendenciaMacro}
 - Força RSI (M5): ${rsi5m.toFixed(2)}
-- Padrão de Reversão/Continuidade Atual: ${padraoMicro}
+- Ação de Preço (M5): ${padraoMicro}
 
-**REGRAS DE DECISÃO:**
-1. Agressividade Qualificada: Se o padrão atual estiver A FAVOR da Tendência Macro e o RSI confirmar, aprove com confiança alta (75%+).
-2. Memória de Erro: Se a última operação foi LOSS ou a Taxa de Acerto Histórica for menor que 50%, EXIJA um padrão de livro (ex: Engolfo ou Martelo claro). Não aceite incertezas.
-3. Se não houver clareza matemática que justifique o risco, declare NEUTRO.
+**REGRAS FLEXÍVEIS DE DECISÃO:**
+1. Fluxo Inteligente: Se houver indícios de força a favor da Tendência Macro (mesmo sem um padrão de livro perfeito), assuma o risco e APROVE a entrada.
+2. Memória Adaptativa: Se a última operação foi LOSS, não se paralise. Apenas busque um gatilho de preço um pouco mais claro do que a tentativa anterior.
+3. Se o mercado estiver totalmente indeciso ou lateral sem volume, declare NEUTRO.
 
 Retorne EXCLUSIVAMENTE em JSON:
-{"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%", "motivo": "Análise direta em até 15 palavras baseada no padrão."}`;
+{"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%", "motivo": "Análise rápida e direta em até 15 palavras."}`;
 
-          const responseGroq = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-            method: 'POST', headers: { 'Authorization': `Bearer ${GROQ_BOT_KEY}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              model: 'llama-3.3-70b-versatile', 
-              messages: [{ role: 'user', content: prompt }],
-              response_format: { type: 'json_object' }, 
-              temperature: 0.2 
-            })
-          });
+        const responseGroq = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST', headers: { 'Authorization': `Bearer ${GROQ_BOT_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: 'llama-3.3-70b-versatile', 
+            messages: [{ role: 'user', content: prompt }],
+            response_format: { type: 'json_object' }, 
+            temperature: 0.3 
+          })
+        });
 
-          if (!responseGroq.ok) continue;
+        if (!responseGroq.ok) continue;
 
-          const ia = JSON.parse((await responseGroq.json()).choices[0].message.content.trim());
-          const confiancaNumerica = parseInt(ia.confianca_padrao);
+        const ia = JSON.parse((await responseGroq.json()).choices[0].message.content.trim());
+        const confiancaNumerica = parseInt(ia.confianca_padrao);
 
-          if ((ia.sinal === 'COMPRA' || ia.sinal === 'VENDA') && confiancaNumerica >= 75) {
-             torneioDeSinais.push({ 
-                 ativo, ia, precoAtual, rsi: rsi5m, padrao: padraoMicro, confianca: confiancaNumerica, 
-                 stats: { totalOps: totalResolvido, taxaAcerto: taxaAcertoAtual, wins, losses } 
-             });
-             console.log(`🎯 [CONFLUÊNCIA] ${ativo}: ${ia.sinal} (${confiancaNumerica}%). Motivo: ${ia.motivo}`);
-          }
+        // Abaixamos a régua de confiança para 70% para garantir mais sinais
+        if ((ia.sinal === 'COMPRA' || ia.sinal === 'VENDA') && confiancaNumerica >= 70) {
+           torneioDeSinais.push({ 
+               ativo, ia, precoAtual, rsi: rsi5m, padrao: padraoMicro, confianca: confiancaNumerica, 
+               stats: { totalOps: totalResolvido, taxaAcerto: taxaAcertoAtual, wins, losses } 
+           });
+           console.log(`🚀 [AGRESSIVO] ${ativo}: ${ia.sinal} (${confiancaNumerica}%).`);
         }
       } catch (e: any) { continue; }
     }
