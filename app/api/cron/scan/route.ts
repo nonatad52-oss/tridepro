@@ -34,7 +34,7 @@ function isMercadoAberto(ticker: string, dataHora: Date) {
   return true; 
 }
 
-// --- ANÁLISE MATEMÁTICA ---
+// --- ANÁLISE MATEMÁTICA (MANTIDA INTACTA) ---
 function mapearAnatomiaVelas(quote: any, quantidade: number) {
   const blocoVelas = [];
   for (let i = 0; i < quote.close.length; i++) {
@@ -85,7 +85,7 @@ function identificarPadraoCandle(velas: any[]) {
   return "VELA_DE_FORCA_NORMAL";
 }
 
-// --- ENVIO TELEGRAM ---
+// --- ENVIO TELEGRAM (ATUALIZADO COM DESEMPENHO GLOBAL) ---
 async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: number, rsi: number, padrao: string, stats: any) {
   try {
     const supabase = getSupabaseClient();
@@ -117,8 +117,11 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
 ⏰ *Entrada:* ${formatadorHora.format(proximaVela)}
 ⏳ *Expiração:* ${formatadorHora.format(expiracao)}
 
-${iconeDesempenho} *Placar Geral do Ativo:*
-*Operações:* ${stats.totalOps} | *Acertos:* ${stats.taxaAcerto}% (${stats.wins}W / ${stats.losses}L)
+${iconeDesempenho} *Placar do Ativo:*
+*Acertos:* ${stats.taxaAcerto}% (${stats.wins}W / ${stats.losses}L)
+
+🌐 *Desempenho Geral do Bot Hoje:*
+*Status:* ${stats.statusBot} (${stats.globalWins}W / ${stats.globalLosses}L)
 
 📊 *Gatilho Identificado:* ${padrao.replace(/_/g, ' ')}
 🔥 *RSI (Força):* ${rsi.toFixed(2)}
@@ -141,7 +144,7 @@ ${iconeDesempenho} *Placar Geral do Ativo:*
 }
 
 export async function GET(request: Request) {
-  console.log("🤖 Iniciando varredura com Inteligência Agressiva e Anti-Cache...");
+  console.log("🤖 Iniciando varredura...");
 
   try {
     const CRON_SECRET = process.env.CRON_SECRET || '17a85b09'; 
@@ -160,9 +163,24 @@ export async function GET(request: Request) {
     const torneioDeSinais = [];
     const agoraUtcMs = new Date().getTime(); 
 
+    // --- NOVO: COLETA DE ESTATÍSTICAS GLOBAIS DE HOJE ---
+    const hojeStr = new Date().toISOString().split('T')[0];
+    const { data: globalHoje } = await supabase
+      .from('historico_operacoes')
+      .select('resultado')
+      .gte('created_at', hojeStr + 'T00:00:00.000Z')
+      .in('resultado', ['WIN', 'LOSS']);
+
+    let globalWins = 0; let globalLosses = 0;
+    if (globalHoje) {
+      globalWins = globalHoje.filter(op => op.resultado === 'WIN').length;
+      globalLosses = globalHoje.filter(op => op.resultado === 'LOSS').length;
+    }
+    const saldoDiario = globalWins - globalLosses;
+    const statusBot = saldoDiario > 0 ? "🟢 POSITIVO" : (saldoDiario < 0 ? "🔴 NEGATIVO" : "⚪ ZERO");
+
     for (const ativo of ativosAtivos) {
       try {
-        // --- 1. COLETA DE ESTATÍSTICAS GLOBAIS ---
         const { data: historicoTotal } = await supabase
           .from('historico_operacoes')
           .select('resultado')
@@ -178,7 +196,6 @@ export async function GET(request: Request) {
         const totalResolvido = wins + losses;
         const taxaAcertoAtual = totalResolvido > 0 ? Math.round((wins / totalResolvido) * 100) : 0;
 
-        // --- 2. TRAVAS TEMPORAIS (Mantidas para segurança) ---
         const { data: ultimasOps } = await supabase
           .from('historico_operacoes')
           .select('resultado, created_at')
@@ -194,15 +211,14 @@ export async function GET(request: Request) {
           const tempoOpDB = new Date(ultimaOp.created_at).getTime();
           const minDecorridos = (agoraUtcMs - tempoOpDB) / (1000 * 60);
 
-          if (minDecorridos < 10) bloqueado = true; // Anti-Spam (10 min)
-          else if (ultimaOp.resultado === 'LOSS' && minDecorridos < 25) bloqueado = true; // Anti-Teimosia (25 min)
+          if (minDecorridos < 10) bloqueado = true; 
+          else if (ultimaOp.resultado === 'LOSS' && minDecorridos < 25) bloqueado = true; 
 
           sequenciaRecente = ultimasOps.map(op => op.resultado).join(" -> ");
         }
 
         if (bloqueado) continue; 
 
-        // --- 3. COLETA TÉCNICA DO GRÁFICO ---
         const [res5m, res15m] = await Promise.all([
           fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=5m&range=1d`, { cache: 'no-store' }),
           fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=15m&range=2d`, { cache: 'no-store' })
@@ -236,7 +252,6 @@ export async function GET(request: Request) {
           else if (velas15m[velas15m.length - 1].fechamento < ema20_M15) tendenciaMacro = "BAIXA";
         }
 
-        // --- 4. PROMPT: MATRIZ AGRESSIVA E OPORTUNISTA ---
         const prompt = `Você é o Cérebro de uma IA de Alta Frequência operando ${ativo}.
 Sua missão: Identificar boas oportunidades no fluxo do preço. Seja inteligente, mas não tenha medo de operar. Agressividade calculada é o foco.
 
@@ -272,13 +287,11 @@ Retorne EXCLUSIVAMENTE em JSON:
         const ia = JSON.parse((await responseGroq.json()).choices[0].message.content.trim());
         const confiancaNumerica = parseInt(ia.confianca_padrao);
 
-        // Abaixamos a régua de confiança para 70% para garantir mais sinais
         if ((ia.sinal === 'COMPRA' || ia.sinal === 'VENDA') && confiancaNumerica >= 70) {
            torneioDeSinais.push({ 
                ativo, ia, precoAtual, rsi: rsi5m, padrao: padraoMicro, confianca: confiancaNumerica, 
-               stats: { totalOps: totalResolvido, taxaAcerto: taxaAcertoAtual, wins, losses } 
+               stats: { totalOps: totalResolvido, taxaAcerto: taxaAcertoAtual, wins, losses, globalWins, globalLosses, statusBot } 
            });
-           console.log(`🚀 [AGRESSIVO] ${ativo}: ${ia.sinal} (${confiancaNumerica}%).`);
         }
       } catch (e: any) { continue; }
     }
@@ -287,6 +300,25 @@ Retorne EXCLUSIVAMENTE em JSON:
       torneioDeSinais.sort((a, b) => b.confianca - a.confianca);
       const alvo = torneioDeSinais[0];
       await enviarSinalTelegram(alvo.ativo, alvo.ia, alvo.precoAtual, alvo.rsi, alvo.padrao, alvo.stats);
+    }
+
+    // --- NOVO: GATILHO DE RELATÓRIO DIÁRIO NO TELEGRAM ---
+    // Se o Cron rodar entre 23:55 e 23:59 (horário de SP), envia o fechamento.
+    if (horaSP.getHours() === 23 && horaSP.getMinutes() >= 55) {
+      const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+      const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
+      
+      const msgRelatorio = `📊 *FECHAMENTO DIÁRIO DO BOT* 📊
+      
+*Status Geral do Dia:* ${statusBot}
+*Placar Total:* ${globalWins} WINS ✅ | ${globalLosses} LOSSES ❌
+
+_Modo de Aprendizado Contínuo. O sistema estará pronto para operar amanhã!_ 🚀`;
+      
+      await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text: msgRelatorio, parse_mode: 'Markdown' })
+      });
     }
 
     return NextResponse.json({ success: true, mensagem: `Análise finalizada.` });
