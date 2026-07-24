@@ -111,7 +111,10 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
       }])
       .select('id').single();
 
-    if (insertError) return; 
+    if (insertError) {
+      console.log(`❌ Erro ao salvar operação no DB:`, insertError.message);
+      return; 
+    }
     if (!insertData) return;
 
     let iconeDesempenho = "📊";
@@ -135,6 +138,7 @@ ${iconeDesempenho} *Placar do Ativo:*
 🧠 *Mapeamento IA:* ${iaData.motivo}
 🎯 *Confiança:* ${iaData.confianca_padrao}`;
     
+    console.log(`📲 Enviando sinal de ${ativo} para o Telegram...`);
     await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ 
@@ -147,25 +151,37 @@ ${iconeDesempenho} *Placar do Ativo:*
         } 
       }),
     });
-  } catch (error: any) {}
+  } catch (error: any) {
+    console.log(`❌ Erro no envio do Telegram:`, error.message);
+  }
 }
 
 export async function GET(request: Request) {
-  console.log("🤖 Iniciando varredura com Inteligência Agressiva (Correções Ativadas)...");
+  console.log("\n=======================================================");
+  console.log("🤖 INICIANDO NOVA VARREDURA - INTELIGÊNCIA AGRESSIVA");
+  console.log("=======================================================");
 
   try {
     const CRON_SECRET = process.env.CRON_SECRET || '17a85b09'; 
     const GROQ_BOT_KEY = process.env.GROQ_BOT_KEY || ''; 
     const { searchParams } = new URL(request.url);
-    if (searchParams.get('key') !== CRON_SECRET) return NextResponse.json({ error: 'Não autorizado' }, { status: 401 });
+    if (searchParams.get('key') !== CRON_SECRET) {
+      console.log("❌ Acesso negado: Chave de cron incorreta.");
+      return NextResponse.json({ error: 'Não autorizado' }, { status: 401 });
+    }
 
     const supabase = getSupabaseClient();
-    const { data: ativosDB } = await supabase.from('ativos_global').select('ticker').eq('status', 'ativo');
-    if (!ativosDB) return NextResponse.json({ error: "Erro DB" }, { status: 500 });
+    const { data: ativosDB, error: ativosError } = await supabase.from('ativos_global').select('ticker').eq('status', 'ativo');
+    if (ativosError || !ativosDB) {
+      console.log("❌ Erro ao buscar ativos no banco de dados.");
+      return NextResponse.json({ error: "Erro DB" }, { status: 500 });
+    }
     
     let ativosBrutos = ativosDB.map(a => a.ticker).filter(a => !a.toUpperCase().includes('OTC'));
     const horaSP = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
     let ativosAtivos = ativosBrutos.filter(ativo => isMercadoAberto(ativo, horaSP));
+    
+    console.log(`📋 Ativos ativos para varredura agora: ${ativosAtivos.length}`);
 
     const torneioDeSinais = [];
     const agoraUtcMs = new Date().getTime(); 
@@ -192,8 +208,12 @@ export async function GET(request: Request) {
     const saldoDiario = globalWins - globalLosses;
     const statusBot = saldoDiario > 0 ? "🟢 POSITIVO" : (saldoDiario < 0 ? "🔴 NEGATIVO" : "⚪ ZERO");
 
+    console.log(`🌐 Placar Geral do Dia calculado: ${globalWins}W / ${globalLosses}L (${statusBot})`);
+
     for (const ativo of ativosAtivos) {
       try {
+        console.log(`\n🔍 [ANÁLISE INICIADA] Ativo: ${ativo}...`);
+        
         const { data: historicoTotal } = await supabase
           .from('historico_operacoes')
           .select('resultado')
@@ -234,19 +254,22 @@ export async function GET(request: Request) {
              if (minDecorridos >= 0) { // Ignora se o calculo der negativo
                  // O anti-spam só avalia a ÚLTIMA operação (índice 0)
                  if (op === ultimasOps[0] && minDecorridos < 10) {
-                     console.log(`⏳ [ANTI-SPAM] ${ativo}: Proteção de 10 minutos ativa.`);
+                     console.log(`⏳ [ANTI-SPAM] ${ativo}: Proteção de 10 minutos ativa. (${Math.round(minDecorridos)} min decorridos).`);
                      bloqueado = true;
                  }
                  // A Teimosia avalia TODAS as 5 operações recentes
                  if (op.resultado === 'LOSS' && minDecorridos < 25) {
-                     console.log(`⛔ [CASTIGO APÓS LOSS] ${ativo}: Travado por erro recente (${Math.round(minDecorridos)} min).`);
+                     console.log(`⛔ [CASTIGO APÓS LOSS] ${ativo}: Travado por erro recente (${Math.round(minDecorridos)} min decorridos).`);
                      bloqueado = true;
                  }
              }
           }
         }
 
-        if (bloqueado) continue; 
+        if (bloqueado) {
+          console.log(`⏭️ [IGNORADO] ${ativo} pulado devido a bloqueio ativo.`);
+          continue; 
+        }
 
         // --- INÍCIO DA ANÁLISE INTACTA ---
         const [res5m, res15m] = await Promise.all([
@@ -254,14 +277,25 @@ export async function GET(request: Request) {
           fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=15m&range=2d`, { cache: 'no-store' })
         ]);
 
-        if (!res5m.ok || !res15m.ok) continue;
+        if (!res5m.ok || !res15m.ok) {
+          console.log(`⚠️ [ERRO DADOS] ${ativo}: Falha ao buscar dados no Yahoo Finance.`);
+          continue;
+        }
+        
         const json5m = await res5m.json(); const json15m = await res15m.json();
         
         const timestamps5m = json5m.chart?.result?.[0]?.timestamp;
-        if (!timestamps5m) continue;
+        if (!timestamps5m) {
+          console.log(`⚠️ [SEM DADOS] ${ativo}: Nenhum timestamp retornado.`);
+          continue;
+        }
+        
         const lastTime = timestamps5m[timestamps5m.length - 1];
         const agoraSec = Math.floor(Date.now() / 1000);
-        if (agoraSec - lastTime > 1200) continue; 
+        if (agoraSec - lastTime > 1200) {
+          console.log(`⏰ [ATRASO/MERCADO FECHADO] ${ativo}: Dados de preço desatualizados ou sem volume.`);
+          continue; 
+        }
 
         const quote5m = json5m.chart?.result?.[0]?.indicators?.quote?.[0];
         const quote15m = json15m.chart?.result?.[0]?.indicators?.quote?.[0];
@@ -269,7 +303,10 @@ export async function GET(request: Request) {
 
         const velas5m = mapearAnatomiaVelas(quote5m, 20);
         const velas15m = mapearAnatomiaVelas(quote15m, 20);
-        if (velas5m.length < 15 || velas15m.length < 20) continue;
+        if (velas5m.length < 15 || velas15m.length < 20) {
+          console.log(`📉 [VELAS INSUFICIENTES] ${ativo}: Faltam dados históricos suficientes para cálculo.`);
+          continue;
+        }
 
         const rsi5m = calcularRSI(velas5m);
         const ema20_M15 = calcularEMA(velas15m, 20);
@@ -281,6 +318,9 @@ export async function GET(request: Request) {
           if (velas15m[velas15m.length - 1].fechamento > ema20_M15) tendenciaMacro = "ALTA";
           else if (velas15m[velas15m.length - 1].fechamento < ema20_M15) tendenciaMacro = "BAIXA";
         }
+
+        console.log(`📊 [TÉCNICO] ${ativo}: RSI: ${rsi5m.toFixed(2)} | MACRO: ${tendenciaMacro} | MICRO: ${padraoMicro}`);
+        console.log(`🧠 [MIA] Enviando ${ativo} para decisão da Inteligência Artificial...`);
 
         const prompt = `Você é o Cérebro de uma IA de Alta Frequência operando ${ativo}.
 Sua missão: Identificar boas oportunidades no fluxo do preço. Seja inteligente, mas não tenha medo de operar. Agressividade calculada é o foco.
@@ -312,7 +352,10 @@ Retorne EXCLUSIVAMENTE em JSON:
           })
         });
 
-        if (!responseGroq.ok) continue;
+        if (!responseGroq.ok) {
+          console.log(`❌ [ERRO API GROQ] ${ativo}: A Inteligência Artificial não respondeu.`);
+          continue;
+        }
 
         const ia = JSON.parse((await responseGroq.json()).choices[0].message.content.trim());
         const confiancaNumerica = parseInt(ia.confianca_padrao);
@@ -322,19 +365,28 @@ Retorne EXCLUSIVAMENTE em JSON:
                ativo, ia, precoAtual, rsi: rsi5m, padrao: padraoMicro, confianca: confiancaNumerica, 
                stats: { totalOps: totalResolvido, taxaAcerto: taxaAcertoAtual, wins, losses, globalWins, globalLosses, statusBot } 
            });
-           console.log(`🚀 [AGRESSIVO] ${ativo}: ${ia.sinal} (${confiancaNumerica}%). Motivo: ${ia.motivo}`);
+           console.log(`🚀 [SINAL APROVADO] ${ativo}: ${ia.sinal} (${confiancaNumerica}%). Motivo: ${ia.motivo}`);
+        } else {
+           console.log(`💤 [SINAL DESCARTADO] ${ativo}: IA decidiu ${ia.sinal} com ${confiancaNumerica}%. Motivo: ${ia.motivo}`);
         }
-      } catch (e: any) { continue; }
+      } catch (e: any) { 
+        console.log(`❌ [ERRO GERAL] ${ativo}:`, e.message);
+        continue; 
+      }
     }
 
     if (torneioDeSinais.length > 0) {
+      console.log(`🏆 Torneio de Sinais: ${torneioDeSinais.length} oportunidades encontradas. Enviando a melhor...`);
       torneioDeSinais.sort((a, b) => b.confianca - a.confianca);
       const alvo = torneioDeSinais[0];
       await enviarSinalTelegram(alvo.ativo, alvo.ia, alvo.precoAtual, alvo.rsi, alvo.padrao, alvo.stats);
+    } else {
+      console.log(`💤 Nenhum sinal aprovado na varredura atual.`);
     }
 
     // --- GATILHO DE RELATÓRIO DIÁRIO NO TELEGRAM ---
     if (horaSP.getHours() === 23 && horaSP.getMinutes() >= 55) {
+      console.log("📊 Disparando Relatório de Fechamento Diário no Telegram...");
       const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
       const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
       
@@ -351,8 +403,10 @@ _Modo de Aprendizado Contínuo. O sistema estará pronto para operar amanhã!_ �
       });
     }
 
+    console.log("✅ Varredura finalizada com sucesso.\n");
     return NextResponse.json({ success: true, mensagem: `Análise finalizada.` });
   } catch (error: any) {
+    console.log("❌ Erro fatal no script da Vercel:", error.message);
     return NextResponse.json({ error: "Erro interno" }, { status: 500 });
   }
 }
