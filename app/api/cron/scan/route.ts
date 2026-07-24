@@ -100,8 +100,15 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
     proximaVela.setSeconds(0); proximaVela.setMilliseconds(0);
     const expiracao = new Date(proximaVela); expiracao.setMinutes(expiracao.getMinutes() + 5);
 
+    // FIX: Forçando timestamp explícito na inserção para não ter conflito de fuso!
     const { data: insertData, error: insertError } = await supabase.from('historico_operacoes')
-      .insert([{ ticker: ativo, sinal: iaData.sinal, taxa_entrada: precoAtual, resultado: 'PENDENTE' }])
+      .insert([{ 
+        ticker: ativo, 
+        sinal: iaData.sinal, 
+        taxa_entrada: precoAtual, 
+        resultado: 'PENDENTE',
+        created_at: new Date().toISOString()
+      }])
       .select('id').single();
 
     if (insertError) return; 
@@ -144,7 +151,7 @@ ${iconeDesempenho} *Placar do Ativo:*
 }
 
 export async function GET(request: Request) {
-  console.log("🤖 Iniciando varredura com Inteligência Agressiva, Anti-Cache e Medidor Global...");
+  console.log("🤖 Iniciando varredura com Inteligência Agressiva (Correções Ativadas)...");
 
   try {
     const CRON_SECRET = process.env.CRON_SECRET || '17a85b09'; 
@@ -163,24 +170,24 @@ export async function GET(request: Request) {
     const torneioDeSinais = [];
     const agoraUtcMs = new Date().getTime(); 
 
-    // --- CORREÇÃO DO MEDIDOR GLOBAL: Fuso horário ajustado para o Brasil ---
-    const ano = horaSP.getFullYear();
-    const mes = String(horaSP.getMonth() + 1).padStart(2, '0');
-    const dia = String(horaSP.getDate()).padStart(2, '0');
-    
-    // 00:00 em Brasília = 03:00 da manhã no UTC (Padrão do banco Supabase)
-    const inicioDoDiaUTC = `${ano}-${mes}-${dia}T03:00:00.000Z`;
-
-    const { data: globalHoje } = await supabase
+    // --- FIX MEDIDOR GLOBAL: Método Blindado em Memória ---
+    const hojeBR = new Date().toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo" });
+    const { data: globalOps } = await supabase
       .from('historico_operacoes')
-      .select('resultado')
-      .gte('created_at', inicioDoDiaUTC)
-      .in('resultado', ['WIN', 'LOSS']);
+      .select('resultado, created_at')
+      .in('resultado', ['WIN', 'LOSS'])
+      .order('created_at', { ascending: false })
+      .limit(1000); 
 
     let globalWins = 0; let globalLosses = 0;
-    if (globalHoje) {
-      globalWins = globalHoje.filter(op => op.resultado === 'WIN').length;
-      globalLosses = globalHoje.filter(op => op.resultado === 'LOSS').length;
+    if (globalOps) {
+      // Filtramos no Javascript para ignorar os problemas de fuso do Supabase
+      const opsDeHoje = globalOps.filter(op => {
+         const dataOp = new Date(op.created_at).toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo" });
+         return dataOp === hojeBR;
+      });
+      globalWins = opsDeHoje.filter(op => op.resultado === 'WIN').length;
+      globalLosses = opsDeHoje.filter(op => op.resultado === 'LOSS').length;
     }
     const saldoDiario = globalWins - globalLosses;
     const statusBot = saldoDiario > 0 ? "🟢 POSITIVO" : (saldoDiario < 0 ? "🔴 NEGATIVO" : "⚪ ZERO");
@@ -202,34 +209,46 @@ export async function GET(request: Request) {
         const totalResolvido = wins + losses;
         const taxaAcertoAtual = totalResolvido > 0 ? Math.round((wins / totalResolvido) * 100) : 0;
 
+        // --- FIX BLOQUEIO (TEIMOSIA): Pegando as 5 últimas ops e forçando UTC ---
         const { data: ultimasOps } = await supabase
           .from('historico_operacoes')
           .select('resultado, created_at')
           .eq('ticker', ativo)
           .order('created_at', { ascending: false })
-          .limit(3);
+          .limit(5);
 
         let bloqueado = false;
         let sequenciaRecente = "Sem histórico imediato.";
 
         if (ultimasOps && ultimasOps.length > 0) {
-          const ultimaOp = ultimasOps[0];
-          const tempoOpDB = new Date(ultimaOp.created_at).getTime();
-          const minDecorridos = (agoraUtcMs - tempoOpDB) / (1000 * 60);
-
-          if (minDecorridos < 10) {
-            console.log(`⏳ [BLOQUEIO ANTI-SPAM] ${ativo}: Sinal recente (${Math.round(minDecorridos)} min atrás).`);
-            bloqueado = true; 
-          } else if (ultimaOp.resultado === 'LOSS' && minDecorridos < 25) {
-            console.log(`⛔ [CASTIGO APÓS LOSS] ${ativo}: Resfriando ativo após erro recente.`);
-            bloqueado = true; 
-          }
-
           sequenciaRecente = ultimasOps.map(op => op.resultado).join(" -> ");
+
+          for (const op of ultimasOps) {
+             let dataStr = op.created_at;
+             // Ajuste para garantir formato Z (UTC) no timestamp
+             if (!dataStr.includes('Z') && !dataStr.includes('+')) dataStr += 'Z';
+             
+             const tempoOpDB = new Date(dataStr).getTime();
+             const minDecorridos = (agoraUtcMs - tempoOpDB) / (1000 * 60);
+
+             if (minDecorridos >= 0) { // Ignora se o calculo der negativo
+                 // O anti-spam só avalia a ÚLTIMA operação (índice 0)
+                 if (op === ultimasOps[0] && minDecorridos < 10) {
+                     console.log(`⏳ [ANTI-SPAM] ${ativo}: Proteção de 10 minutos ativa.`);
+                     bloqueado = true;
+                 }
+                 // A Teimosia avalia TODAS as 5 operações recentes
+                 if (op.resultado === 'LOSS' && minDecorridos < 25) {
+                     console.log(`⛔ [CASTIGO APÓS LOSS] ${ativo}: Travado por erro recente (${Math.round(minDecorridos)} min).`);
+                     bloqueado = true;
+                 }
+             }
+          }
         }
 
         if (bloqueado) continue; 
 
+        // --- INÍCIO DA ANÁLISE INTACTA ---
         const [res5m, res15m] = await Promise.all([
           fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=5m&range=1d`, { cache: 'no-store' }),
           fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=15m&range=2d`, { cache: 'no-store' })
