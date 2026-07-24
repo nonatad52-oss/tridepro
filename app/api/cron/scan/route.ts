@@ -1,14 +1,20 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
+// --- DESTRUIDORES DE CACHE (Força o sistema a ler o banco de dados em tempo real) ---
 export const maxDuration = 60; 
 export const dynamic = 'force-dynamic';
+export const fetchCache = 'force-no-store';
+export const revalidate = 0;
 
 const getSupabaseClient = () => {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
   const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY;
   if (!url || !key) throw new Error("Credenciais do Supabase não configuradas.");
-  return createClient(url, key);
+  
+  return createClient(url, key, {
+    auth: { persistSession: false }
+  });
 };
 
 // --- FILTRO DE HORÁRIO ---
@@ -79,7 +85,7 @@ function identificarPadraoCandle(velas: any[]) {
   return "VELA_DE_FORCA_NORMAL";
 }
 
-// --- ENVIO TELEGRAM ---
+// --- ENVIO TELEGRAM COM PROTEÇÃO DE INSERÇÃO ---
 async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: number, rsi: number, padrao: string, stats: any) {
   try {
     const supabase = getSupabaseClient();
@@ -94,9 +100,16 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
     proximaVela.setSeconds(0); proximaVela.setMilliseconds(0);
     const expiracao = new Date(proximaVela); expiracao.setMinutes(expiracao.getMinutes() + 5);
 
-    const { data: insertData } = await supabase.from('historico_operacoes')
+    // Tenta salvar o sinal PENDENTE no banco
+    const { data: insertData, error: insertError } = await supabase.from('historico_operacoes')
       .insert([{ ticker: ativo, sinal: iaData.sinal, taxa_entrada: precoAtual, resultado: 'PENDENTE' }])
       .select('id').single();
+
+    // EXIBE ERRO E BLOQUEIA ENVIO SE O BANCO DE DADOS RECUSAR A GRAVAÇÃO
+    if (insertError) {
+      console.error(`❌ ALERTA CRÍTICO: O Supabase bloqueou a gravação de ${ativo}! O bot abortou o sinal para não gerar repetição. Erro:`, insertError.message);
+      return; 
+    }
 
     if (!insertData) return;
 
@@ -135,7 +148,7 @@ ${iconeDesempenho} *Placar Geral do Ativo:*
 }
 
 export async function GET(request: Request) {
-  console.log("🤖 Iniciando varredura com Inteligência Suprema de Padrões...");
+  console.log("🤖 Iniciando varredura com Inteligência Suprema de Padrões e Anti-Cache...");
 
   try {
     const CRON_SECRET = process.env.CRON_SECRET || '17a85b09'; 
@@ -152,19 +165,17 @@ export async function GET(request: Request) {
     let ativosAtivos = ativosBrutos.filter(ativo => isMercadoAberto(ativo, horaSP));
 
     const torneioDeSinais = [];
-    
-    // Pega o timestamp atual em UTC exato para evitar bugs de fuso horário
     const agoraUtcMs = new Date().getTime(); 
 
     for (const ativo of ativosAtivos) {
       try {
-        // --- 1. COLETA DE ESTATÍSTICAS GLOBAIS (O PLACAR REAL) ---
+        // --- 1. COLETA DE ESTATÍSTICAS GLOBAIS ---
         const { data: historicoTotal } = await supabase
           .from('historico_operacoes')
           .select('resultado')
           .eq('ticker', ativo)
           .in('resultado', ['WIN', 'LOSS'])
-          .limit(300); // Puxa uma boa amostragem para precisão
+          .limit(300);
 
         let wins = 0; let losses = 0;
         if (historicoTotal) {
@@ -174,7 +185,7 @@ export async function GET(request: Request) {
         const totalResolvido = wins + losses;
         const taxaAcertoAtual = totalResolvido > 0 ? Math.round((wins / totalResolvido) * 100) : 0;
 
-        // --- 2. TRAVAS TEMPORAIS BLINDADAS (ANTI-REPETIÇÃO) ---
+        // --- 2. TRAVAS TEMPORAIS BLINDADAS ---
         const { data: ultimasOps } = await supabase
           .from('historico_operacoes')
           .select('resultado, created_at')
@@ -187,16 +198,13 @@ export async function GET(request: Request) {
 
         if (ultimasOps && ultimasOps.length > 0) {
           const ultimaOp = ultimasOps[0];
-          // Garante que o tempo do banco seja lido corretamente
           const tempoOpDB = new Date(ultimaOp.created_at).getTime();
           const minDecorridos = (agoraUtcMs - tempoOpDB) / (1000 * 60);
 
-          // Trava Absoluta: NUNCA envia sinal do mesmo ativo com menos de 10 minutos
           if (minDecorridos < 10) {
              console.log(`⏳ [BLOQUEIO ANTI-SPAM] ${ativo}: Sinal recente (${Math.round(minDecorridos)} min atrás).`);
              bloqueado = true;
           }
-          // Trava de Teimosia: Se a última foi LOSS, aguarda 25 minutos obrigatoriamente
           else if (ultimaOp.resultado === 'LOSS' && minDecorridos < 25) {
              console.log(`⛔ [CASTIGO APÓS LOSS] ${ativo}: Resfriando ativo após erro recente.`);
              bloqueado = true;
@@ -205,7 +213,7 @@ export async function GET(request: Request) {
           sequenciaRecente = ultimasOps.map(op => op.resultado).join(" -> ");
         }
 
-        if (bloqueado) continue; // Pula para o próximo ativo imediatamente
+        if (bloqueado) continue; 
 
         // --- 3. COLETA TÉCNICA DO GRÁFICO ---
         const [res5m, res15m] = await Promise.all([
@@ -216,7 +224,6 @@ export async function GET(request: Request) {
         if (!res5m.ok || !res15m.ok) continue;
         const json5m = await res5m.json(); const json15m = await res15m.json();
         
-        // Proteção contra ativo sem liquidez/fechado
         const timestamps5m = json5m.chart?.result?.[0]?.timestamp;
         if (!timestamps5m) continue;
         const lastTime = timestamps5m[timestamps5m.length - 1];
@@ -252,7 +259,7 @@ Sua missão: Identificar padrões repetitivos e operar com "Inteligência Suprem
 
 🧠 **DADOS DE APRENDIZADO DESTE ATIVO:**
 - Taxa de Acerto Histórica: ${taxaAcertoAtual}% (${wins} Wins / ${losses} Losses)
-- Resultados das últimas 3 operações (Mais recente primeiro): ${sequenciaRecente}
+- Resultados das últimas operações (Mais recente primeiro): ${sequenciaRecente}
 
 📊 **MAPEAMENTO TÉCNICO ATUAL:**
 - Tendência Macro (M15): ${tendenciaMacro}
