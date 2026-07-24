@@ -34,7 +34,7 @@ function isMercadoAberto(ticker: string, dataHora: Date) {
   return true; 
 }
 
-// --- ANÁLISE MATEMÁTICA (MANTIDA INTACTA) ---
+// --- ANÁLISE MATEMÁTICA ---
 function mapearAnatomiaVelas(quote: any, quantidade: number) {
   const blocoVelas = [];
   for (let i = 0; i < quote.close.length; i++) {
@@ -85,7 +85,7 @@ function identificarPadraoCandle(velas: any[]) {
   return "VELA_DE_FORCA_NORMAL";
 }
 
-// --- ENVIO TELEGRAM (ATUALIZADO COM DESEMPENHO GLOBAL) ---
+// --- ENVIO TELEGRAM ---
 async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: number, rsi: number, padrao: string, stats: any) {
   try {
     const supabase = getSupabaseClient();
@@ -144,7 +144,7 @@ ${iconeDesempenho} *Placar do Ativo:*
 }
 
 export async function GET(request: Request) {
-  console.log("🤖 Iniciando varredura...");
+  console.log("🤖 Iniciando varredura com Inteligência Agressiva, Anti-Cache e Medidor Global...");
 
   try {
     const CRON_SECRET = process.env.CRON_SECRET || '17a85b09'; 
@@ -163,7 +163,7 @@ export async function GET(request: Request) {
     const torneioDeSinais = [];
     const agoraUtcMs = new Date().getTime(); 
 
-    // --- NOVO: COLETA DE ESTATÍSTICAS GLOBAIS DE HOJE ---
+    // --- COLETA DE ESTATÍSTICAS GLOBAIS DE HOJE ---
     const hojeStr = new Date().toISOString().split('T')[0];
     const { data: globalHoje } = await supabase
       .from('historico_operacoes')
@@ -211,8 +211,13 @@ export async function GET(request: Request) {
           const tempoOpDB = new Date(ultimaOp.created_at).getTime();
           const minDecorridos = (agoraUtcMs - tempoOpDB) / (1000 * 60);
 
-          if (minDecorridos < 10) bloqueado = true; 
-          else if (ultimaOp.resultado === 'LOSS' && minDecorridos < 25) bloqueado = true; 
+          if (minDecorridos < 10) {
+            console.log(`⏳ [BLOQUEIO ANTI-SPAM] ${ativo}: Sinal recente (${Math.round(minDecorridos)} min atrás).`);
+            bloqueado = true; 
+          } else if (ultimaOp.resultado === 'LOSS' && minDecorridos < 25) {
+            console.log(`⛔ [CASTIGO APÓS LOSS] ${ativo}: Resfriando ativo após erro recente.`);
+            bloqueado = true; 
+          }
 
           sequenciaRecente = ultimasOps.map(op => op.resultado).join(" -> ");
         }
@@ -292,6 +297,8 @@ Retorne EXCLUSIVAMENTE em JSON:
                ativo, ia, precoAtual, rsi: rsi5m, padrao: padraoMicro, confianca: confiancaNumerica, 
                stats: { totalOps: totalResolvido, taxaAcerto: taxaAcertoAtual, wins, losses, globalWins, globalLosses, statusBot } 
            });
+           // LOGS DE INTELIGÊNCIA RESTAURADOS AQUI!
+           console.log(`🚀 [AGRESSIVO] ${ativo}: ${ia.sinal} (${confiancaNumerica}%). Motivo: ${ia.motivo}`);
         }
       } catch (e: any) { continue; }
     }
@@ -302,8 +309,7 @@ Retorne EXCLUSIVAMENTE em JSON:
       await enviarSinalTelegram(alvo.ativo, alvo.ia, alvo.precoAtual, alvo.rsi, alvo.padrao, alvo.stats);
     }
 
-    // --- NOVO: GATILHO DE RELATÓRIO DIÁRIO NO TELEGRAM ---
-    // Se o Cron rodar entre 23:55 e 23:59 (horário de SP), envia o fechamento.
+    // --- GATILHO DE RELATÓRIO DIÁRIO NO TELEGRAM ---
     if (horaSP.getHours() === 23 && horaSP.getMinutes() >= 55) {
       const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
       const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
