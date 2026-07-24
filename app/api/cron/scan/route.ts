@@ -163,12 +163,18 @@ export async function GET(request: Request) {
     const torneioDeSinais = [];
     const agoraUtcMs = new Date().getTime(); 
 
-    // --- COLETA DE ESTATÍSTICAS GLOBAIS DE HOJE ---
-    const hojeStr = new Date().toISOString().split('T')[0];
+    // --- CORREÇÃO DO MEDIDOR GLOBAL: Fuso horário ajustado para o Brasil ---
+    const ano = horaSP.getFullYear();
+    const mes = String(horaSP.getMonth() + 1).padStart(2, '0');
+    const dia = String(horaSP.getDate()).padStart(2, '0');
+    
+    // 00:00 em Brasília = 03:00 da manhã no UTC (Padrão do banco Supabase)
+    const inicioDoDiaUTC = `${ano}-${mes}-${dia}T03:00:00.000Z`;
+
     const { data: globalHoje } = await supabase
       .from('historico_operacoes')
       .select('resultado')
-      .gte('created_at', hojeStr + 'T00:00:00.000Z')
+      .gte('created_at', inicioDoDiaUTC)
       .in('resultado', ['WIN', 'LOSS']);
 
     let globalWins = 0; let globalLosses = 0;
@@ -297,7 +303,6 @@ Retorne EXCLUSIVAMENTE em JSON:
                ativo, ia, precoAtual, rsi: rsi5m, padrao: padraoMicro, confianca: confiancaNumerica, 
                stats: { totalOps: totalResolvido, taxaAcerto: taxaAcertoAtual, wins, losses, globalWins, globalLosses, statusBot } 
            });
-           // LOGS DE INTELIGÊNCIA RESTAURADOS AQUI!
            console.log(`🚀 [AGRESSIVO] ${ativo}: ${ia.sinal} (${confiancaNumerica}%). Motivo: ${ia.motivo}`);
         }
       } catch (e: any) { continue; }
