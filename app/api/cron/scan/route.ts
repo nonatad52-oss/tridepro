@@ -11,22 +11,21 @@ const getSupabaseClient = () => {
   return createClient(url, key);
 };
 
-// --- FILTRO DE HORÁRIO PRELIMINAR ---
+// --- FILTRO DE HORÁRIO ---
 function isMercadoAberto(ticker: string, dataHora: Date) {
   const dia = dataHora.getDay(); 
   const hora = dataHora.getHours();
   const minuto = dataHora.getMinutes();
   const tempoDecimal = hora + (minuto / 60);
   
-  if (ticker.endsWith('-USD')) return true; // Criptos 24/7
-  
+  if (ticker.endsWith('-USD')) return true; 
   const isFimDeSemana = (dia === 0 || dia === 6);
   if (ticker.endsWith('.SA')) {
     if (isFimDeSemana) return false;
     if (tempoDecimal < 10 || tempoDecimal >= 17.5) return false;
     return true;
   }
-  return true; // Deixa passar os outros para o Filtro de Timestamp barrar se estiver fechado
+  return true; 
 }
 
 // --- ANÁLISE MATEMÁTICA ---
@@ -103,21 +102,22 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
 
     let iconeDesempenho = "📊";
     if (stats.taxaAcerto >= 70) iconeDesempenho = "🏆";
-    else if (stats.taxaAcerto <= 40 && stats.totalOps > 0) iconeDesempenho = "⚠️";
+    else if (stats.taxaAcerto <= 45 && stats.totalOps > 0) iconeDesempenho = "⚠️";
 
-    const mensagem = `🤖 *SINAL IA DINÂMICO* 🤖
+    const mensagem = `🤖 *SINAL IA - INTELIGÊNCIA SUPREMA* 🤖
 *Ativo:* ${ativoFormatado}
 *Ação:* ${iaData.sinal === 'COMPRA' ? '🟢 COMPRA' : '🔴 VENDA'}
 ⏰ *Entrada:* ${formatadorHora.format(proximaVela)}
 ⏳ *Expiração:* ${formatadorHora.format(expiracao)}
 
-${iconeDesempenho} *Placar da IA neste Ativo:*
-*Operações:* ${stats.totalOps} | *Acertos:* ${stats.taxaAcerto}%
+${iconeDesempenho} *Placar Geral do Ativo:*
+*Total de Operações:* ${stats.totalOps}
+*Acertos:* ${stats.taxaAcerto}% (${stats.wins} W / ${stats.losses} L)
 
-📊 *Gatilho:* ${padrao.replace(/_/g, ' ')}
-🔥 *RSI M5:* ${rsi.toFixed(2)}
-🧠 *Análise:* ${iaData.motivo}
-🎯 *Confiança:* ${iaData.confianca_padrao}`;
+📊 *Gatilho Identificado:* ${padrao.replace(/_/g, ' ')}
+🔥 *RSI (Força):* ${rsi.toFixed(2)}
+🧠 *Mapeamento IA:* ${iaData.motivo}
+🎯 *Confiança Padrão:* ${iaData.confianca_padrao}`;
     
     await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -135,7 +135,7 @@ ${iconeDesempenho} *Placar da IA neste Ativo:*
 }
 
 export async function GET(request: Request) {
-  console.log("🤖 Iniciando varredura Balanceada (Filtro Tempo Real ativo)...");
+  console.log("🤖 Iniciando varredura com Inteligência Suprema de Padrões...");
 
   try {
     const CRON_SECRET = process.env.CRON_SECRET || '17a85b09'; 
@@ -152,53 +152,62 @@ export async function GET(request: Request) {
     let ativosAtivos = ativosBrutos.filter(ativo => isMercadoAberto(ativo, horaSP));
 
     const torneioDeSinais = [];
-    const agoraMs = Date.now();
+    
+    // Pega o timestamp atual em UTC exato para evitar bugs de fuso horário
+    const agoraUtcMs = new Date().getTime(); 
 
     for (const ativo of ativosAtivos) {
       try {
-        // --- 1. MEMÓRIA DE MERCADO E TRAVAS RELAXADAS ---
-        const { data: historicoRecente } = await supabase
+        // --- 1. COLETA DE ESTATÍSTICAS GLOBAIS (O PLACAR REAL) ---
+        const { data: historicoTotal } = await supabase
           .from('historico_operacoes')
-          .select('resultado, sinal, created_at')
+          .select('resultado')
+          .eq('ticker', ativo)
+          .in('resultado', ['WIN', 'LOSS'])
+          .limit(300); // Puxa uma boa amostragem para precisão
+
+        let wins = 0; let losses = 0;
+        if (historicoTotal) {
+          wins = historicoTotal.filter(op => op.resultado === 'WIN').length;
+          losses = historicoTotal.filter(op => op.resultado === 'LOSS').length;
+        }
+        const totalResolvido = wins + losses;
+        const taxaAcertoAtual = totalResolvido > 0 ? Math.round((wins / totalResolvido) * 100) : 0;
+
+        // --- 2. TRAVAS TEMPORAIS BLINDADAS (ANTI-REPETIÇÃO) ---
+        const { data: ultimasOps } = await supabase
+          .from('historico_operacoes')
+          .select('resultado, created_at')
           .eq('ticker', ativo)
           .order('created_at', { ascending: false })
-          .limit(15);
+          .limit(3);
 
-        let wins = 0; let losses = 0; let totalResolvido = 0;
-        let taxaAcertoAtual = 0;
+        let bloqueado = false;
+        let sequenciaRecente = "Sem histórico imediato.";
 
-        if (historicoRecente && historicoRecente.length > 0) {
-          // TRAVA 1: Anti-Spam (Reduzido para 10 min)
-          const enviouSinalRecente = historicoRecente.some(op => {
-            const minDecorridos = (agoraMs - new Date(op.created_at).getTime()) / (1000 * 60);
-            return minDecorridos < 10;
-          });
-          if (enviouSinalRecente) continue; // Pula sem encher os logs
+        if (ultimasOps && ultimasOps.length > 0) {
+          const ultimaOp = ultimasOps[0];
+          // Garante que o tempo do banco seja lido corretamente
+          const tempoOpDB = new Date(ultimaOp.created_at).getTime();
+          const minDecorridos = (agoraUtcMs - tempoOpDB) / (1000 * 60);
 
-          // TRAVA 2: Anti-Teimosia (Reduzido para 25 min após um LOSS)
-          const teveLossRecente = historicoRecente.slice(0, 2).some(op => {
-            const minDecorridos = (agoraMs - new Date(op.created_at).getTime()) / (1000 * 60);
-            return op.resultado === 'LOSS' && minDecorridos < 25;
-          });
-          if (teveLossRecente) {
-             console.log(`⛔ [ANTI-TEIMOSIA] ${ativo} pausado temporariamente após LOSS (25 min de resfriamento).`);
-             continue; 
+          // Trava Absoluta: NUNCA envia sinal do mesmo ativo com menos de 10 minutos
+          if (minDecorridos < 10) {
+             console.log(`⏳ [BLOQUEIO ANTI-SPAM] ${ativo}: Sinal recente (${Math.round(minDecorridos)} min atrás).`);
+             bloqueado = true;
+          }
+          // Trava de Teimosia: Se a última foi LOSS, aguarda 25 minutos obrigatoriamente
+          else if (ultimaOp.resultado === 'LOSS' && minDecorridos < 25) {
+             console.log(`⛔ [CASTIGO APÓS LOSS] ${ativo}: Resfriando ativo após erro recente.`);
+             bloqueado = true;
           }
 
-          // Estatísticas Reais
-          historicoRecente.forEach(op => {
-            if (op.resultado === 'WIN') wins++;
-            if (op.resultado === 'LOSS') losses++;
-          });
-          totalResolvido = wins + losses;
-          if (totalResolvido > 0) taxaAcertoAtual = Math.round((wins / totalResolvido) * 100);
+          sequenciaRecente = ultimasOps.map(op => op.resultado).join(" -> ");
         }
 
-        const comportamentoRecente = totalResolvido > 0 
-          ? `Operações recentes: ${wins} WINS e ${losses} LOSSES (Acerto: ${taxaAcertoAtual}%).`
-          : `Sem dados suficientes na sessão atual.`;
+        if (bloqueado) continue; // Pula para o próximo ativo imediatamente
 
-        // --- 2. COLETA TÉCNICA E FILTRO DE MERCADO FECHADO ---
+        // --- 3. COLETA TÉCNICA DO GRÁFICO ---
         const [res5m, res15m] = await Promise.all([
           fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=5m&range=1d`, { cache: 'no-store' }),
           fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=15m&range=2d`, { cache: 'no-store' })
@@ -207,17 +216,12 @@ export async function GET(request: Request) {
         if (!res5m.ok || !res15m.ok) continue;
         const json5m = await res5m.json(); const json15m = await res15m.json();
         
-        // NOVO: BLOQUEIO ABSOLUTO DE MERCADO FECHADO
+        // Proteção contra ativo sem liquidez/fechado
         const timestamps5m = json5m.chart?.result?.[0]?.timestamp;
         if (!timestamps5m) continue;
         const lastTime = timestamps5m[timestamps5m.length - 1];
         const agoraSec = Math.floor(Date.now() / 1000);
-        
-        // Se a última vela foi há mais de 20 minutos (1200 seg), o mercado está inativo/fechado. Pula!
-        if (agoraSec - lastTime > 1200) {
-           console.log(`💤 [MERCADO FECHADO] ${ativo} ignorado: Sem volume/velas nos últimos 20 min.`);
-           continue;
-        }
+        if (agoraSec - lastTime > 1200) continue; 
 
         const quote5m = json5m.chart?.result?.[0]?.indicators?.quote?.[0];
         const quote15m = json15m.chart?.result?.[0]?.indicators?.quote?.[0];
@@ -238,28 +242,30 @@ export async function GET(request: Request) {
           else if (velas15m[velas15m.length - 1].fechamento < ema20_M15) tendenciaMacro = "BAIXA";
         }
 
-        // --- 3. PROMPT DE ANÁLISE BALANCEADO ---
+        // --- 4. PROMPT: MATRIZ DE RECONHECIMENTO DE PADRÕES ---
         const temPadrao = padraoMicro !== "VELA_DE_FORCA_NORMAL" && padraoMicro !== "NENHUM";
-        const rsiOportunidade = rsi5m <= 48 || rsi5m >= 52; // Alargado para pegar inícios de fluxo
+        const rsiOportunidade = rsi5m <= 48 || rsi5m >= 52; 
 
         if (temPadrao || rsiOportunidade) {
-          const prompt = `Você é o Cérebro de um Robô de Opções Binárias operando ${ativo}.
-Sua missão: Encontrar bons gatilhos a favor da tendência sem ser perfeccionista ao extremo, mas evitando riscos desnecessários.
+          const prompt = `Você é o Cérebro de uma IA de Alta Frequência operando ${ativo}.
+Sua missão: Identificar padrões repetitivos e operar com "Inteligência Suprema" — seja agressivo quando houver confluência técnica, mas rejeite implacavelmente padrões fracos se o histórico deste ativo estiver ruim.
 
-🧠 **DESEMPENHO DO ATIVO:** ${comportamentoRecente}
+🧠 **DADOS DE APRENDIZADO DESTE ATIVO:**
+- Taxa de Acerto Histórica: ${taxaAcertoAtual}% (${wins} Wins / ${losses} Losses)
+- Resultados das últimas 3 operações (Mais recente primeiro): ${sequenciaRecente}
 
-📊 **CENÁRIO ATUAL (M5 e M15):**
+📊 **MAPEAMENTO TÉCNICO ATUAL:**
 - Tendência Macro (M15): ${tendenciaMacro}
-- Indicador RSI (M5): ${rsi5m.toFixed(2)}
-- Ação de Preço (M5): ${padraoMicro}
+- Força RSI (M5): ${rsi5m.toFixed(2)}
+- Padrão de Reversão/Continuidade Atual: ${padraoMicro}
 
-**REGRAS:**
-1. A operação DEVE preferencialmente acompanhar a Tendência Macro.
-2. Seja perspicaz: aceite padrões bons que não sejam de livro, desde que o contexto faça sentido (ex: retração a favor da tendência).
-3. Responda NEUTRO se estiver muito confuso.
+**REGRAS DE DECISÃO:**
+1. Agressividade Qualificada: Se o padrão atual estiver A FAVOR da Tendência Macro e o RSI confirmar, aprove com confiança alta (75%+).
+2. Memória de Erro: Se a última operação foi LOSS ou a Taxa de Acerto Histórica for menor que 50%, EXIJA um padrão de livro (ex: Engolfo ou Martelo claro). Não aceite incertezas.
+3. Se não houver clareza matemática que justifique o risco, declare NEUTRO.
 
 Retorne EXCLUSIVAMENTE em JSON:
-{"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%", "motivo": "Motivo direto em 15 palavras."}`;
+{"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%", "motivo": "Análise direta em até 15 palavras baseada no padrão."}`;
 
           const responseGroq = await fetch('https://api.groq.com/openai/v1/chat/completions', {
             method: 'POST', headers: { 'Authorization': `Bearer ${GROQ_BOT_KEY}`, 'Content-Type': 'application/json' },
@@ -267,7 +273,7 @@ Retorne EXCLUSIVAMENTE em JSON:
               model: 'llama-3.3-70b-versatile', 
               messages: [{ role: 'user', content: prompt }],
               response_format: { type: 'json_object' }, 
-              temperature: 0.25 // Temperatura aumentada para maior flexibilidade na aprovação
+              temperature: 0.2 
             })
           });
 
@@ -276,12 +282,12 @@ Retorne EXCLUSIVAMENTE em JSON:
           const ia = JSON.parse((await responseGroq.json()).choices[0].message.content.trim());
           const confiancaNumerica = parseInt(ia.confianca_padrao);
 
-          if ((ia.sinal === 'COMPRA' || ia.sinal === 'VENDA') && confiancaNumerica >= 70) {
+          if ((ia.sinal === 'COMPRA' || ia.sinal === 'VENDA') && confiancaNumerica >= 75) {
              torneioDeSinais.push({ 
                  ativo, ia, precoAtual, rsi: rsi5m, padrao: padraoMicro, confianca: confiancaNumerica, 
-                 stats: { totalOps: totalResolvido, taxaAcerto: taxaAcertoAtual } 
+                 stats: { totalOps: totalResolvido, taxaAcerto: taxaAcertoAtual, wins, losses } 
              });
-             console.log(`✅ [APROVADO] ${ativo}: Sinal de ${ia.sinal} (${confiancaNumerica}%). Motivo: ${ia.motivo}`);
+             console.log(`🎯 [CONFLUÊNCIA] ${ativo}: ${ia.sinal} (${confiancaNumerica}%). Motivo: ${ia.motivo}`);
           }
         }
       } catch (e: any) { continue; }
