@@ -83,7 +83,7 @@ function identificarPadraoCandle(velas: any[]) {
   if (corpoAtual < (tamanhoTotalAtual * 0.20)) return "DOJI_EXAUSTAO";
   if (anterior.direcao === "BAIXA" && atual.direcao === "ALTA" && atual.fechamento > anterior.abertura) return "ENGOLFO_DE_ALTA";
   if (anterior.direcao === "ALTA" && atual.direcao === "BAIXA" && atual.fechamento < anterior.abertura) return "ENGOLFO_DE_BAIXA";
-  if (atual.pavio_inf > corpoAtual * 1.5 && atual.pavio_sup <= corpoAtual * 0.8) return "MART惹_REJEICAO_BAIXA";
+  if (atual.pavio_inf > corpoAtual * 1.5 && atual.pavio_sup <= corpoAtual * 0.8) return "MARTELO_REJEICAO_BAIXA";
   if (atual.pavio_sup > corpoAtual * 1.5 && atual.pavio_inf <= corpoAtual * 0.8) return "ESTRELA_CADENTE_REJEICAO_ALTA";
   return "VELA_DE_FORCA_NORMAL";
 }
@@ -169,6 +169,12 @@ export async function GET(request: Request) {
     let ativosBrutos = ativosDB.map(a => a.ticker).filter(a => !a.toUpperCase().includes('OTC'));
     const horaSP = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
     let ativosAtivos = ativosBrutos.filter(ativo => isMercadoAberto(ativo, horaSP));
+
+    // --- CORREÇÃO DO TIMEOUT: ROLETA DE ATIVOS ---
+    // 1. Embaralha a lista aleatoriamente para o robô sempre olhar ativos diferentes
+    ativosAtivos.sort(() => Math.random() - 0.5);
+    // 2. Limita a 12 ativos por ciclo para garantir que executa em menos de 60 segundos
+    ativosAtivos = ativosAtivos.slice(0, 12);
 
     const torneioDeSinais = [];
     const agoraUtcMs = new Date().getTime(); 
@@ -326,10 +332,11 @@ Retorne EXCLUSIVAMENTE em JSON:
             }
         }
 
-        if (!iaResposta) continue; // Pula o ativo se a IA não respondeu após as tentativas
+        if (!iaResposta) continue; 
 
         const confiancaNumerica = parseInt(iaResposta.confianca_padrao);
 
+        // --- SISTEMA DE CONFIANÇA (Definido para >= 70) ---
         if ((iaResposta.sinal === 'COMPRA' || iaResposta.sinal === 'VENDA') && confiancaNumerica >= 70) {
            torneioDeSinais.push({ 
                ativo, ia: iaResposta, precoAtual, rsi: rsi5m, padrao: padraoMicro, confianca: confiancaNumerica, 
@@ -346,7 +353,6 @@ Retorne EXCLUSIVAMENTE em JSON:
     }
 
     // --- GATILHO DE RELATÓRIO DIÁRIO NO TELEGRAM ---
-    // Ajustado para garantir que o bot poste o fechamento do dia (>= 50 minutos)
     if (horaSP.getHours() === 23 && horaSP.getMinutes() >= 50) {
       const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
       const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
