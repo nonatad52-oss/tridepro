@@ -150,31 +150,44 @@ ${iconeDesempenho} *Histórico do Ativo:*
         } 
       }),
     });
-  } catch (error: any) {}
+    console.log(`✅ [TELEGRAM] Sinal enviado com sucesso para ${ativo}!`);
+  } catch (error: any) {
+    console.error(`❌ [TELEGRAM ERRO] Falha ao enviar sinal para ${ativo}:`, error.message);
+  }
 }
 
 export async function GET(request: Request) {
-  console.log("🤖 Iniciando varredura com Inteligência Agressiva...");
+  console.log("==========================================");
+  console.log("🤖 INICIANDO CICLO DO ROBÔ...");
+  console.log("==========================================");
 
   try {
     const CRON_SECRET = process.env.CRON_SECRET || '17a85b09'; 
     const GROQ_BOT_KEY = process.env.GROQ_BOT_KEY || ''; 
     const { searchParams } = new URL(request.url);
-    if (searchParams.get('key') !== CRON_SECRET) return NextResponse.json({ error: 'Não autorizado' }, { status: 401 });
+    if (searchParams.get('key') !== CRON_SECRET) {
+      console.log("❌ Acesso negado. Chave incorreta.");
+      return NextResponse.json({ error: 'Não autorizado' }, { status: 401 });
+    }
 
     const supabase = getSupabaseClient();
     const { data: ativosDB } = await supabase.from('ativos_global').select('ticker').eq('status', 'ativo');
-    if (!ativosDB) return NextResponse.json({ error: "Erro DB" }, { status: 500 });
+    if (!ativosDB) {
+      console.log("❌ Erro ao buscar ativos no banco de dados.");
+      return NextResponse.json({ error: "Erro DB" }, { status: 500 });
+    }
     
     let ativosBrutos = ativosDB.map(a => a.ticker).filter(a => !a.toUpperCase().includes('OTC'));
     const horaSP = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
     let ativosAtivos = ativosBrutos.filter(ativo => isMercadoAberto(ativo, horaSP));
 
+    console.log(`📋 Total de ativos abertos no momento: ${ativosAtivos.length}`);
+
     // --- CORREÇÃO DO TIMEOUT: ROLETA DE ATIVOS ---
-    // 1. Embaralha a lista aleatoriamente para o robô sempre olhar ativos diferentes
     ativosAtivos.sort(() => Math.random() - 0.5);
-    // 2. Limita a 12 ativos por ciclo para garantir que executa em menos de 60 segundos
     ativosAtivos = ativosAtivos.slice(0, 12);
+    
+    console.log(`🎰 Sorteados 12 ativos para esta rodada: ${ativosAtivos.join(', ')}`);
 
     const torneioDeSinais = [];
     const agoraUtcMs = new Date().getTime(); 
@@ -250,7 +263,10 @@ export async function GET(request: Request) {
           }
         }
 
-        if (bloqueado) continue; 
+        if (bloqueado) {
+            console.log(`⏳ [${ativo}] Pulando: Bloqueio de segurança (Operou recentemente)`);
+            continue; 
+        }
 
         // --- BUSCA DE DADOS YAHOO FINANCE ---
         const [res5m, res15m] = await Promise.all([
@@ -258,14 +274,20 @@ export async function GET(request: Request) {
           fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=15m&range=2d`, { cache: 'no-store' })
         ]);
 
-        if (!res5m.ok || !res15m.ok) continue;
+        if (!res5m.ok || !res15m.ok) {
+            console.log(`⚠️ [${ativo}] Falha ao buscar dados no Yahoo Finance.`);
+            continue;
+        }
         const json5m = await res5m.json(); const json15m = await res15m.json();
         
         const timestamps5m = json5m.chart?.result?.[0]?.timestamp;
         if (!timestamps5m) continue;
         const lastTime = timestamps5m[timestamps5m.length - 1];
         const agoraSec = Math.floor(Date.now() / 1000);
-        if (agoraSec - lastTime > 1200) continue; 
+        if (agoraSec - lastTime > 1200) {
+            console.log(`⚠️ [${ativo}] Ativo parece estar sem volume/fechado agora.`);
+            continue; 
+        }
 
         const quote5m = json5m.chart?.result?.[0]?.indicators?.quote?.[0];
         const quote15m = json15m.chart?.result?.[0]?.indicators?.quote?.[0];
@@ -311,6 +333,8 @@ Retorne EXCLUSIVAMENTE em JSON:
         let tentativas = 0;
         const maxTentativas = 2;
 
+        console.log(`🧠 [${ativo}] Enviando dados para a Inteligência Artificial...`);
+
         while (tentativas < maxTentativas && !iaResposta) {
             try {
                 await delay(2000); // Pausa estratégica para evitar Rate Limit
@@ -326,15 +350,20 @@ Retorne EXCLUSIVAMENTE em JSON:
 
                 if (!responseGroq.ok) throw new Error(`Status ${responseGroq.status}`);
                 iaResposta = JSON.parse((await responseGroq.json()).choices[0].message.content.trim());
-            } catch (err) {
+            } catch (err: any) {
                 tentativas++;
-                if (tentativas < maxTentativas) await delay(3000); // Tenta de novo se falhar
+                console.log(`⚠️ [${ativo}] Falha na IA (${err.message}). Tentativa ${tentativas} de ${maxTentativas}`);
+                if (tentativas < maxTentativas) await delay(3000); 
             }
         }
 
-        if (!iaResposta) continue; 
+        if (!iaResposta) {
+            console.log(`❌ [${ativo}] IA não respondeu após várias tentativas.`);
+            continue; 
+        }
 
         const confiancaNumerica = parseInt(iaResposta.confianca_padrao);
+        console.log(`🎯 [${ativo}] IA Respondeu: SINAL ${iaResposta.sinal} | CONFIANÇA: ${confiancaNumerica}% | MOTIVO: ${iaResposta.motivo}`);
 
         // --- SISTEMA DE CONFIANÇA (Definido para >= 70) ---
         if ((iaResposta.sinal === 'COMPRA' || iaResposta.sinal === 'VENDA') && confiancaNumerica >= 70) {
@@ -343,17 +372,28 @@ Retorne EXCLUSIVAMENTE em JSON:
                stats: { totalOps: totalResolvido, taxaAcerto: taxaAcertoAtual, wins, losses, globalWins, globalLosses, statusBot, taxaAcertoDiaria } 
            });
         }
-      } catch (e: any) { continue; }
+      } catch (e: any) { 
+          console.error(`💥 [${ativo}] Erro crítico durante processamento:`, e.message);
+          continue; 
+      }
     }
 
+    console.log("==========================================");
     if (torneioDeSinais.length > 0) {
+      console.log(`🏆 TORNEIO FINALIZADO! Tivemos ${torneioDeSinais.length} ativo(s) aprovados pela IA.`);
       torneioDeSinais.sort((a, b) => b.confianca - a.confianca);
       const alvo = torneioDeSinais[0];
+      
+      console.log(`🥇 VENCEDOR: ${alvo.ativo} com ${alvo.confianca}% de confiança. Enviando para o Telegram...`);
       await enviarSinalTelegram(alvo.ativo, alvo.ia, alvo.precoAtual, alvo.rsi, alvo.padrao, alvo.stats);
+    } else {
+      console.log(`🛑 FIM DA RODADA: Nenhum sinal atingiu a confiança mínima de 70%. Aguardando próximo ciclo.`);
     }
+    console.log("==========================================\n");
 
     // --- GATILHO DE RELATÓRIO DIÁRIO NO TELEGRAM ---
     if (horaSP.getHours() === 23 && horaSP.getMinutes() >= 50) {
+      console.log("📊 Horário de Relatório Diário atingido. Enviando para o Telegram...");
       const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
       const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
       
@@ -372,8 +412,9 @@ _Modo de Aprendizado Contínuo. O sistema estará pronto para operar amanhã!_ �
       });
     }
 
-    return NextResponse.json({ success: true, mensagem: `Análise finalizada.` });
+    return NextResponse.json({ success: true, mensagem: `Análise finalizada. Logs gerados com sucesso.` });
   } catch (error: any) {
+    console.error("❌ ERRO FATAL NA EXECUÇÃO:", error);
     return NextResponse.json({ error: "Erro interno" }, { status: 500 });
   }
 }
