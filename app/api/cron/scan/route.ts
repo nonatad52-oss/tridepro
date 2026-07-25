@@ -17,6 +17,9 @@ const getSupabaseClient = () => {
   });
 };
 
+// --- FUNÇÃO AUXILIAR DE DELAY (ANTIBLOQUEIO GROQ) ---
+const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
+
 // --- FILTRO DE HORÁRIO ---
 function isMercadoAberto(ticker: string, dataHora: Date) {
   const dia = dataHora.getDay(); 
@@ -80,7 +83,7 @@ function identificarPadraoCandle(velas: any[]) {
   if (corpoAtual < (tamanhoTotalAtual * 0.20)) return "DOJI_EXAUSTAO";
   if (anterior.direcao === "BAIXA" && atual.direcao === "ALTA" && atual.fechamento > anterior.abertura) return "ENGOLFO_DE_ALTA";
   if (anterior.direcao === "ALTA" && atual.direcao === "BAIXA" && atual.fechamento < anterior.abertura) return "ENGOLFO_DE_BAIXA";
-  if (atual.pavio_inf > corpoAtual * 1.5 && atual.pavio_sup <= corpoAtual * 0.8) return "MARTELO_REJEICAO_BAIXA";
+  if (atual.pavio_inf > corpoAtual * 1.5 && atual.pavio_sup <= corpoAtual * 0.8) return "MART惹_REJEICAO_BAIXA";
   if (atual.pavio_sup > corpoAtual * 1.5 && atual.pavio_inf <= corpoAtual * 0.8) return "ESTRELA_CADENTE_REJEICAO_ALTA";
   return "VELA_DE_FORCA_NORMAL";
 }
@@ -100,7 +103,6 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
     proximaVela.setSeconds(0); proximaVela.setMilliseconds(0);
     const expiracao = new Date(proximaVela); expiracao.setMinutes(expiracao.getMinutes() + 5);
 
-    // FIX: Forçando timestamp explícito na inserção para não ter conflito de fuso!
     const { data: insertData, error: insertError } = await supabase.from('historico_operacoes')
       .insert([{ 
         ticker: ativo, 
@@ -111,8 +113,7 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
       }])
       .select('id').single();
 
-    if (insertError) return; 
-    if (!insertData) return;
+    if (insertError || !insertData) return;
 
     let iconeDesempenho = "📊";
     if (stats.taxaAcerto >= 65) iconeDesempenho = "🏆";
@@ -124,11 +125,13 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
 ⏰ *Entrada:* ${formatadorHora.format(proximaVela)}
 ⏳ *Expiração:* ${formatadorHora.format(expiracao)}
 
-${iconeDesempenho} *Placar do Ativo:*
+${iconeDesempenho} *Histórico do Ativo:*
 *Acertos:* ${stats.taxaAcerto}% (${stats.wins}W / ${stats.losses}L)
 
-🌐 *Desempenho Geral do Bot Hoje:*
-*Status:* ${stats.statusBot} (${stats.globalWins}W / ${stats.globalLosses}L)
+🌐 *PLACAR DO DIA (BOT):*
+*Status:* ${stats.statusBot}
+*Acertos Hoje:* ${stats.taxaAcertoDiaria}% 🎯
+*Total:* ${stats.globalWins} WINS ✅ / ${stats.globalLosses} LOSSES ❌
 
 📊 *Gatilho Identificado:* ${padrao.replace(/_/g, ' ')}
 🔥 *RSI (Força):* ${rsi.toFixed(2)}
@@ -151,7 +154,7 @@ ${iconeDesempenho} *Placar do Ativo:*
 }
 
 export async function GET(request: Request) {
-  console.log("🤖 Iniciando varredura com Inteligência Agressiva (Correções Ativadas)...");
+  console.log("🤖 Iniciando varredura com Inteligência Agressiva...");
 
   try {
     const CRON_SECRET = process.env.CRON_SECRET || '17a85b09'; 
@@ -170,7 +173,7 @@ export async function GET(request: Request) {
     const torneioDeSinais = [];
     const agoraUtcMs = new Date().getTime(); 
 
-    // --- FIX MEDIDOR GLOBAL: Método Blindado em Memória ---
+    // --- CÁLCULO DO PLACAR DIÁRIO GLOBAL ---
     const hojeBR = new Date().toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo" });
     const { data: globalOps } = await supabase
       .from('historico_operacoes')
@@ -181,7 +184,6 @@ export async function GET(request: Request) {
 
     let globalWins = 0; let globalLosses = 0;
     if (globalOps) {
-      // Filtramos no Javascript para ignorar os problemas de fuso do Supabase
       const opsDeHoje = globalOps.filter(op => {
          const dataOp = new Date(op.created_at).toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo" });
          return dataOp === hojeBR;
@@ -189,7 +191,10 @@ export async function GET(request: Request) {
       globalWins = opsDeHoje.filter(op => op.resultado === 'WIN').length;
       globalLosses = opsDeHoje.filter(op => op.resultado === 'LOSS').length;
     }
+    
     const saldoDiario = globalWins - globalLosses;
+    const totalOpsDiaria = globalWins + globalLosses;
+    const taxaAcertoDiaria = totalOpsDiaria > 0 ? Math.round((globalWins / totalOpsDiaria) * 100) : 0;
     const statusBot = saldoDiario > 0 ? "🟢 POSITIVO" : (saldoDiario < 0 ? "🔴 NEGATIVO" : "⚪ ZERO");
 
     for (const ativo of ativosAtivos) {
@@ -209,7 +214,6 @@ export async function GET(request: Request) {
         const totalResolvido = wins + losses;
         const taxaAcertoAtual = totalResolvido > 0 ? Math.round((wins / totalResolvido) * 100) : 0;
 
-        // --- FIX BLOQUEIO (TEIMOSIA): Pegando as 5 últimas ops e forçando UTC ---
         const { data: ultimasOps } = await supabase
           .from('historico_operacoes')
           .select('resultado, created_at')
@@ -222,24 +226,18 @@ export async function GET(request: Request) {
 
         if (ultimasOps && ultimasOps.length > 0) {
           sequenciaRecente = ultimasOps.map(op => op.resultado).join(" -> ");
-
           for (const op of ultimasOps) {
              let dataStr = op.created_at;
-             // Ajuste para garantir formato Z (UTC) no timestamp
              if (!dataStr.includes('Z') && !dataStr.includes('+')) dataStr += 'Z';
              
              const tempoOpDB = new Date(dataStr).getTime();
              const minDecorridos = (agoraUtcMs - tempoOpDB) / (1000 * 60);
 
-             if (minDecorridos >= 0) { // Ignora se o calculo der negativo
-                 // O anti-spam só avalia a ÚLTIMA operação (índice 0)
+             if (minDecorridos >= 0) { 
                  if (op === ultimasOps[0] && minDecorridos < 10) {
-                     console.log(`⏳ [ANTI-SPAM] ${ativo}: Proteção de 10 minutos ativa.`);
                      bloqueado = true;
                  }
-                 // A Teimosia avalia TODAS as 5 operações recentes
                  if (op.resultado === 'LOSS' && minDecorridos < 25) {
-                     console.log(`⛔ [CASTIGO APÓS LOSS] ${ativo}: Travado por erro recente (${Math.round(minDecorridos)} min).`);
                      bloqueado = true;
                  }
              }
@@ -248,7 +246,7 @@ export async function GET(request: Request) {
 
         if (bloqueado) continue; 
 
-        // --- INÍCIO DA ANÁLISE INTACTA ---
+        // --- BUSCA DE DADOS YAHOO FINANCE ---
         const [res5m, res15m] = await Promise.all([
           fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=5m&range=1d`, { cache: 'no-store' }),
           fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=15m&range=2d`, { cache: 'no-store' })
@@ -295,34 +293,48 @@ Sua missão: Identificar boas oportunidades no fluxo do preço. Seja inteligente
 - Ação de Preço (M5): ${padraoMicro}
 
 **REGRAS FLEXÍVEIS DE DECISÃO:**
-1. Fluxo Inteligente: Se houver indícios de força a favor da Tendência Macro (mesmo sem um padrão de livro perfeito), assuma o risco e APROVE a entrada.
-2. Memória Adaptativa: Se a última operação foi LOSS, não se paralise. Apenas busque um gatilho de preço um pouco mais claro do que a tentativa anterior.
-3. Se o mercado estiver totalmente indeciso ou lateral sem volume, declare NEUTRO.
+1. Fluxo Inteligente: Se houver indícios de força a favor da Tendência Macro, assuma o risco e APROVE a entrada.
+2. Memória Adaptativa: Se a última operação foi LOSS, não se paralise. Apenas busque um gatilho de preço um pouco mais claro.
+3. Se o mercado estiver totalmente indeciso, declare NEUTRO.
 
 Retorne EXCLUSIVAMENTE em JSON:
 {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%", "motivo": "Análise rápida e direta em até 15 palavras."}`;
 
-        const responseGroq = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-          method: 'POST', headers: { 'Authorization': `Bearer ${GROQ_BOT_KEY}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model: 'llama-3.3-70b-versatile', 
-            messages: [{ role: 'user', content: prompt }],
-            response_format: { type: 'json_object' }, 
-            temperature: 0.3 
-          })
-        });
+        // --- SISTEMA ANTIBLOQUEIO (DELAY + RETRY NO GROQ) ---
+        let iaResposta = null;
+        let tentativas = 0;
+        const maxTentativas = 2;
 
-        if (!responseGroq.ok) continue;
+        while (tentativas < maxTentativas && !iaResposta) {
+            try {
+                await delay(2000); // Pausa estratégica para evitar Rate Limit
+                const responseGroq = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+                    method: 'POST', headers: { 'Authorization': `Bearer ${GROQ_BOT_KEY}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        model: 'llama-3.3-70b-versatile', 
+                        messages: [{ role: 'user', content: prompt }],
+                        response_format: { type: 'json_object' }, 
+                        temperature: 0.3 
+                    })
+                });
 
-        const ia = JSON.parse((await responseGroq.json()).choices[0].message.content.trim());
-        const confiancaNumerica = parseInt(ia.confianca_padrao);
+                if (!responseGroq.ok) throw new Error(`Status ${responseGroq.status}`);
+                iaResposta = JSON.parse((await responseGroq.json()).choices[0].message.content.trim());
+            } catch (err) {
+                tentativas++;
+                if (tentativas < maxTentativas) await delay(3000); // Tenta de novo se falhar
+            }
+        }
 
-        if ((ia.sinal === 'COMPRA' || ia.sinal === 'VENDA') && confiancaNumerica >= 70) {
+        if (!iaResposta) continue; // Pula o ativo se a IA não respondeu após as tentativas
+
+        const confiancaNumerica = parseInt(iaResposta.confianca_padrao);
+
+        if ((iaResposta.sinal === 'COMPRA' || iaResposta.sinal === 'VENDA') && confiancaNumerica >= 70) {
            torneioDeSinais.push({ 
-               ativo, ia, precoAtual, rsi: rsi5m, padrao: padraoMicro, confianca: confiancaNumerica, 
-               stats: { totalOps: totalResolvido, taxaAcerto: taxaAcertoAtual, wins, losses, globalWins, globalLosses, statusBot } 
+               ativo, ia: iaResposta, precoAtual, rsi: rsi5m, padrao: padraoMicro, confianca: confiancaNumerica, 
+               stats: { totalOps: totalResolvido, taxaAcerto: taxaAcertoAtual, wins, losses, globalWins, globalLosses, statusBot, taxaAcertoDiaria } 
            });
-           console.log(`🚀 [AGRESSIVO] ${ativo}: ${ia.sinal} (${confiancaNumerica}%). Motivo: ${ia.motivo}`);
         }
       } catch (e: any) { continue; }
     }
@@ -334,7 +346,8 @@ Retorne EXCLUSIVAMENTE em JSON:
     }
 
     // --- GATILHO DE RELATÓRIO DIÁRIO NO TELEGRAM ---
-    if (horaSP.getHours() === 23 && horaSP.getMinutes() >= 55) {
+    // Ajustado para garantir que o bot poste o fechamento do dia (>= 50 minutos)
+    if (horaSP.getHours() === 23 && horaSP.getMinutes() >= 50) {
       const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
       const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
       
@@ -342,6 +355,8 @@ Retorne EXCLUSIVAMENTE em JSON:
       
 *Status Geral do Dia:* ${statusBot}
 *Placar Total:* ${globalWins} WINS ✅ | ${globalLosses} LOSSES ❌
+*Taxa de Acerto Hoje:* ${taxaAcertoDiaria}% 🎯
+*Total de Operações:* ${totalOpsDiaria}
 
 _Modo de Aprendizado Contínuo. O sistema estará pronto para operar amanhã!_ 🚀`;
       
