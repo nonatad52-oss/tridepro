@@ -183,11 +183,11 @@ export async function GET(request: Request) {
 
     console.log(`📋 Total de ativos abertos no momento: ${ativosAtivos.length}`);
 
-    // --- CORREÇÃO DO TIMEOUT: ROLETA DE ATIVOS ---
+    // --- OTIMIZAÇÃO GROQ: ROLETA DE 8 ATIVOS ---
     ativosAtivos.sort(() => Math.random() - 0.5);
-    ativosAtivos = ativosAtivos.slice(0, 12);
+    ativosAtivos = ativosAtivos.slice(0, 8); // Reduzido de 12 para 8
     
-    console.log(`🎰 Sorteados 12 ativos para esta rodada: ${ativosAtivos.join(', ')}`);
+    console.log(`🎰 Sorteados 8 ativos para esta rodada: ${ativosAtivos.join(', ')}`);
 
     const torneioDeSinais = [];
     const agoraUtcMs = new Date().getTime(); 
@@ -337,7 +337,8 @@ Retorne EXCLUSIVAMENTE em JSON:
 
         while (tentativas < maxTentativas && !iaResposta) {
             try {
-                await delay(2000); // Pausa estratégica para evitar Rate Limit
+                // Aumento estratégico do delay primário para 3 segundos
+                await delay(3000); 
                 const responseGroq = await fetch('https://api.groq.com/openai/v1/chat/completions', {
                     method: 'POST', headers: { 'Authorization': `Bearer ${GROQ_BOT_KEY}`, 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -353,7 +354,8 @@ Retorne EXCLUSIVAMENTE em JSON:
             } catch (err: any) {
                 tentativas++;
                 console.log(`⚠️ [${ativo}] Falha na IA (${err.message}). Tentativa ${tentativas} de ${maxTentativas}`);
-                if (tentativas < maxTentativas) await delay(3000); 
+                // Se falhar (erro 429), pausa maior de 5 segundos antes de tentar de novo
+                if (tentativas < maxTentativas) await delay(5000); 
             }
         }
 
