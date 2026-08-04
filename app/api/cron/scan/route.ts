@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
-// --- DESTRUIDORES DE CACHE ---
+// --- CONFIGURAÇÕES DO SERVERLESS (VERCEL) ---
 export const maxDuration = 60; 
 export const dynamic = 'force-dynamic';
 export const fetchCache = 'force-no-store';
@@ -17,10 +17,8 @@ const getSupabaseClient = () => {
   });
 };
 
-// --- FUNÇÃO AUXILIAR DE DELAY ---
 const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
 
-// --- FILTRO DE HORÁRIO ---
 function isMercadoAberto(ticker: string, dataHora: Date) {
   const dia = dataHora.getDay(); 
   const hora = dataHora.getHours();
@@ -37,7 +35,6 @@ function isMercadoAberto(ticker: string, dataHora: Date) {
   return true; 
 }
 
-// --- ANÁLISE MATEMÁTICA ---
 function mapearAnatomiaVelas(quote: any, quantidade: number) {
   const blocoVelas = [];
   for (let i = 0; i < quote.close.length; i++) {
@@ -88,7 +85,6 @@ function identificarPadraoCandle(velas: any[]) {
   return "VELA_DE_FORCA_NORMAL";
 }
 
-// --- ENVIO TELEGRAM ---
 async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: number, rsi: number, padrao: string, stats: any) {
   try {
     const supabase = getSupabaseClient();
@@ -104,19 +100,25 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
     const expiracao = new Date(proximaVela); expiracao.setMinutes(expiracao.getMinutes() + 5);
 
     let operacaoId = null;
-    try {
-      const { data: insertData } = await supabase.from('historico_operacoes')
-        .insert([{ 
-          ticker: ativo, 
-          sinal: iaData.sinal, 
-          taxa_entrada: precoAtual, 
-          resultado: 'PENDENTE',
-          created_at: new Date().toISOString()
-        }])
-        .select('id').single();
-      if (insertData) operacaoId = insertData.id;
-    } catch (dbErr: any) {
-      console.error("⚠️ Aviso: Falha ao registrar no Supabase antes do envio:", dbErr.message);
+    const { data: insertData, error: insertError } = await supabase
+      .from('historico_operacoes')
+      .insert([{ 
+        ticker: ativo, 
+        sinal: iaData.sinal, 
+        taxa_entrada: precoAtual, 
+        resultado: 'PENDENTE',
+        created_at: new Date().toISOString()
+      }])
+      .select('id')
+      .maybeSingle();
+
+    if (insertError) {
+      console.error("❌ [SUPABASE ERRO]:", insertError.message);
+    } else if (insertData) {
+      operacaoId = insertData.id;
+      console.log(`✅ [SUPABASE] Operação registrada ID: ${operacaoId}`);
+    } else {
+      console.warn("⚠️ [SUPABASE] Registro feito, mas ID não retornado.");
     }
 
     let iconeDesempenho = "📊";
@@ -155,6 +157,8 @@ ${iconeDesempenho} *Histórico do Ativo:*
           [{ text: '🗑️ NÃO PEGUEI', callback_data: `DEL_${operacaoId}` }]
         ] 
       };
+    } else {
+      console.warn("⚠️ Mensagem enviada sem botões interativos pois operacaoId é nulo.");
     }
     
     const resTg = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
@@ -200,7 +204,6 @@ export async function GET(request: Request) {
 
     console.log(`📋 Total de ativos abertos no momento: ${ativosAtivos.length}`);
 
-    // --- ROLETA DE 6 ATIVOS PARA VELOCIDADE MÁXIMA ---
     ativosAtivos.sort(() => Math.random() - 0.5);
     ativosAtivos = ativosAtivos.slice(0, 6);
     
@@ -209,7 +212,6 @@ export async function GET(request: Request) {
     const torneioDeSinais = [];
     const agoraUtcMs = new Date().getTime(); 
 
-    // --- CÁLCULO DO PLACAR DIÁRIO GLOBAL ---
     const hojeBR = new Date().toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo" });
     const { data: globalOps } = await supabase
       .from('historico_operacoes')
@@ -285,7 +287,6 @@ export async function GET(request: Request) {
             continue; 
         }
 
-        // --- BUSCA DE DADOS YAHOO FINANCE ---
         const [res5m, res15m] = await Promise.all([
           fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=5m&range=1d`, { cache: 'no-store' }),
           fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=15m&range=2d`, { cache: 'no-store' })
@@ -344,7 +345,6 @@ Sua missão: Identificar boas oportunidades no fluxo do preço. Seja inteligente
 Retorne EXCLUSIVAMENTE em JSON:
 {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%", "motivo": "Análise rápida em até 15 palavras."}`;
 
-        // --- SISTEMA OTIMIZADO GROQ (MODELO INSTANTÂNEO) ---
         let iaResposta = null;
         let tentativas = 0;
         const maxTentativas = 2;
@@ -357,7 +357,7 @@ Retorne EXCLUSIVAMENTE em JSON:
                 const responseGroq = await fetch('https://api.groq.com/openai/v1/chat/completions', {
                     method: 'POST', headers: { 'Authorization': `Bearer ${GROQ_BOT_KEY}`, 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        model: 'llama-3.1-8b-instant', // <--- MODELO RÁPIDO E SEM LIMITES RÍGIDOS DE RATE-LIMIT
+                        model: 'llama-3.1-8b-instant',
                         messages: [{ role: 'user', content: prompt }],
                         response_format: { type: 'json_object' }, 
                         temperature: 0.2 
@@ -381,7 +381,6 @@ Retorne EXCLUSIVAMENTE em JSON:
         const confiancaNumerica = parseInt(iaResposta.confianca_padrao);
         console.log(`🎯 [${ativo}] IA Respondeu: SINAL ${iaResposta.sinal} | CONFIANÇA: ${confiancaNumerica}% | MOTIVO: ${iaResposta.motivo}`);
 
-        // --- SISTEMA DE CONFIANÇA (>= 70%) ---
         if ((iaResposta.sinal === 'COMPRA' || iaResposta.sinal === 'VENDA') && confiancaNumerica >= 70) {
            torneioDeSinais.push({ 
                ativo, ia: iaResposta, precoAtual, rsi: rsi5m, padrao: padraoMicro, confianca: confiancaNumerica, 
@@ -407,7 +406,6 @@ Retorne EXCLUSIVAMENTE em JSON:
     }
     console.log("==========================================\n");
 
-    // --- GATILHO DE RELATÓRIO DIÁRIO NO TELEGRAM ---
     if (horaSP.getHours() === 23 && horaSP.getMinutes() >= 50) {
       console.log("📊 Horário de Relatório Diário atingido. Enviando para o Telegram...");
       const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
