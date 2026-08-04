@@ -19,19 +19,37 @@ const getSupabaseClient = () => {
 
 const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
 
-function isMercadoAberto(ticker: string, dataHora: Date) {
-  const dia = dataHora.getDay(); 
-  const hora = dataHora.getHours();
-  const minuto = dataHora.getMinutes();
+// ============================================================================
+// FUNÇÃO DE HORÁRIO ATUALIZADA (FUSO DE BRASÍLIA FORÇADO)
+// ============================================================================
+function isMercadoAberto(ticker: string) {
+  // Criptomoedas são 24/7
+  if (ticker.includes('-USD') || ticker.includes('BTC') || ticker.includes('ETH')) {
+    return true; 
+  }
+
+  // Força o horário para Brasília (UTC-3), ignorando o fuso da Vercel/Servidor
+  const agora = new Date();
+  const horaBrasil = new Date(agora.toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
+  
+  const dia = horaBrasil.getDay(); 
+  const hora = horaBrasil.getHours();
+  const minuto = horaBrasil.getMinutes();
   const tempoDecimal = hora + (minuto / 60);
   
-  if (ticker.endsWith('-USD')) return true; 
   const isFimDeSemana = (dia === 0 || dia === 6);
+
+  // Regra específica para Ações do Brasil (B3)
   if (ticker.endsWith('.SA')) {
     if (isFimDeSemana) return false;
     if (tempoDecimal < 10 || tempoDecimal >= 17.5) return false;
     return true;
   }
+  
+  // Regra para Forex e outros mercados estrangeiros (bloqueia fim de semana)
+  // Durante a semana, o sensor de volume (abaixo) cuidará de feriados ou horários específicos
+  if (isFimDeSemana) return false;
+
   return true; 
 }
 
@@ -159,7 +177,7 @@ async function verificarResultadosPendentes(supabase: any) {
 }
 
 // ============================================================================
-// FUNÇÃO DE ENVIO DE SINAL (Botões Manuais Removidos)
+// FUNÇÃO DE ENVIO DE SINAL 
 // ============================================================================
 async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: number, rsi: number, padrao: string, stats: any) {
   try {
@@ -175,14 +193,20 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
     proximaVela.setSeconds(0); proximaVela.setMilliseconds(0);
     const expiracao = new Date(proximaVela); expiracao.setMinutes(expiracao.getMinutes() + 5);
 
-    // Salva a operação como PENDENTE. O Robô conferirá o resultado sozinho depois!
-    await supabase.from('historico_operacoes').insert([{ 
+    // Salva a operação como PENDENTE capturando possíveis erros do banco
+    const { error: insertError } = await supabase.from('historico_operacoes').insert([{ 
       ticker: ativo, 
       sinal: iaData.sinal, 
       taxa_entrada: precoAtual, 
       resultado: 'PENDENTE',
       created_at: new Date().toISOString()
     }]);
+
+    if (insertError) {
+      console.error("❌ [ERRO SUPABASE - NÃO GRAVOU]:", insertError.message, insertError.details);
+    } else {
+      console.log(`✅ [SUPABASE] Sinal PENDENTE gravado com sucesso para ${ativo}!`);
+    }
 
     let iconeDesempenho = "📊";
     if (stats.taxaAcerto >= 65) iconeDesempenho = "🏆";
@@ -247,7 +271,6 @@ export async function GET(request: Request) {
     const supabase = getSupabaseClient();
 
     // 1️⃣ CHAMA O AUDITOR AUTOMÁTICO ANTES DE TUDO
-    // Ele vai conferir as operações antigas que fecharam e te mandar os WINS/LOSS no Telegram
     await verificarResultadosPendentes(supabase);
 
     // 2️⃣ SEGUE O FLUXO NORMAL BUSCANDO NOVAS OPORTUNIDADES
@@ -257,8 +280,9 @@ export async function GET(request: Request) {
     }
     
     let ativosBrutos = ativosDB.map(a => a.ticker).filter(a => !a.toUpperCase().includes('OTC'));
-    const horaSP = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
-    let ativosAtivos = ativosBrutos.filter(ativo => isMercadoAberto(ativo, horaSP));
+    
+    // CHAMADA ATUALIZADA DA FUNÇÃO DE HORÁRIO
+    let ativosAtivos = ativosBrutos.filter(ativo => isMercadoAberto(ativo));
 
     console.log(`📋 Total de ativos abertos no momento: ${ativosAtivos.length}`);
 
@@ -341,7 +365,7 @@ export async function GET(request: Request) {
         }
 
         if (bloqueado) {
-            console.log(`⏳ [${ativo}] Pulando: Bloqueio de segurança`);
+            console.log(`⏳ [${ativo}] Pulando: Bloqueio de segurança ativo`);
             continue; 
         }
 
@@ -356,6 +380,23 @@ export async function GET(request: Request) {
         const quote5m = json5m.chart?.result?.[0]?.indicators?.quote?.[0];
         const quote15m = json15m.chart?.result?.[0]?.indicators?.quote?.[0];
         if (!quote5m?.close || !quote15m?.close) continue;
+
+        // ====================================================================
+        // NOVO: SENSOR DE VOLUME (DETECTA SE O ATIVO PAROU DE MOVER)
+        // ====================================================================
+        const timestamps5m = json5m.chart?.result?.[0]?.timestamp;
+        if (timestamps5m && timestamps5m.length > 0) {
+          const agoraSec = Math.floor(Date.now() / 1000); 
+          const ultimaMovimentacao = timestamps5m[timestamps5m.length - 1]; 
+          const diferencaMinutos = (agoraSec - ultimaMovimentacao) / 60;
+
+          // Se não for cripto e preço estiver sem mexer há mais de 20 min, pula!
+          if (!ativo.includes('-USD') && diferencaMinutos > 20) {
+            console.log(`⚠️ [BLOQUEADO] ${ativo} parece estar fechado! Última vela há ${Math.round(diferencaMinutos)} min.`);
+            continue; 
+          }
+        }
+        // ====================================================================
 
         const velas5m = mapearAnatomiaVelas(quote5m, 20);
         const velas15m = mapearAnatomiaVelas(quote15m, 20);
@@ -404,10 +445,10 @@ Retorne JSON: {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%"
         const confiancaNumerica = parseInt(iaResposta.confianca_padrao);
 
         if ((iaResposta.sinal === 'COMPRA' || iaResposta.sinal === 'VENDA') && confiancaNumerica >= 70) {
-           torneioDeSinais.push({ 
-               ativo, ia: iaResposta, precoAtual, rsi: rsi5m, padrao: padraoMicro, confianca: confiancaNumerica, 
-               stats: { totalOps: totalResolvido, taxaAcerto: taxaAcertoAtual, wins, losses, globalWins, globalLosses, statusBot, taxaAcertoDiaria } 
-           });
+            torneioDeSinais.push({ 
+                ativo, ia: iaResposta, precoAtual, rsi: rsi5m, padrao: padraoMicro, confianca: confiancaNumerica, 
+                stats: { totalOps: totalResolvido, taxaAcerto: taxaAcertoAtual, wins, losses, globalWins, globalLosses, statusBot, taxaAcertoDiaria } 
+            });
         }
       } catch (e: any) { 
           continue; 
@@ -424,7 +465,8 @@ Retorne JSON: {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%"
     }
     console.log("==========================================\n");
 
-    if (horaSP.getHours() === 23 && horaSP.getMinutes() >= 50) {
+    const horaSPParaRelatorio = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
+    if (horaSPParaRelatorio.getHours() === 23 && horaSPParaRelatorio.getMinutes() >= 50) {
       const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
       const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
       
