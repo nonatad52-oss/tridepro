@@ -85,6 +85,82 @@ function identificarPadraoCandle(velas: any[]) {
   return "VELA_DE_FORCA_NORMAL";
 }
 
+// ============================================================================
+// NOVO MÓDULO: AUDITORIA AUTOMÁTICA DE RESULTADOS (WIN / LOSS)
+// ============================================================================
+async function verificarResultadosPendentes(supabase: any) {
+  console.log("🔍 [AUDITORIA] Buscando operações pendentes no banco de dados...");
+  
+  // Busca operações com mais de 6 minutos (tempo suficiente para a vela de 5m fechar)
+  const tempoLimite = new Date(Date.now() - 6 * 60 * 1000).toISOString();
+  
+  const { data: pendentes } = await supabase
+    .from('historico_operacoes')
+    .select('*')
+    .eq('resultado', 'PENDENTE')
+    .lt('created_at', tempoLimite);
+
+  if (!pendentes || pendentes.length === 0) {
+    console.log("✔️ [AUDITORIA] Nenhuma operação pendente aguardando conferência.");
+    return;
+  }
+
+  console.log(`⏱️ [AUDITORIA] Encontradas ${pendentes.length} operações para conferir!`);
+  const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+  const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
+
+  for (const op of pendentes) {
+    try {
+      // Busca o preço de fechamento mais recente do ativo
+      const res = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${op.ticker}?interval=1m&range=1d`, { cache: 'no-store' });
+      if (!res.ok) continue;
+      const json = await res.json();
+      
+      const quote = json.chart?.result?.[0]?.indicators?.quote?.[0];
+      if (!quote || !quote.close) continue;
+
+      // Pega o último preço (o fechamento após os 5 minutos)
+      const precoFechamento = quote.close[quote.close.length - 1];
+      
+      // Lógica de Veredito Automático
+      let resultadoFinal = 'LOSS';
+      if (op.sinal === 'COMPRA' && precoFechamento > op.taxa_entrada) resultadoFinal = 'WIN';
+      if (op.sinal === 'VENDA' && precoFechamento < op.taxa_entrada) resultadoFinal = 'WIN';
+      if (precoFechamento === op.taxa_entrada) resultadoFinal = 'EMPATE';
+
+      // Atualiza o banco de dados
+      await supabase.from('historico_operacoes').update({ resultado: resultadoFinal }).eq('id', op.id);
+      
+      console.log(`🎯 [AUDITORIA] ${op.ticker} finalizado! Sinal: ${op.sinal} | Resultado: ${resultadoFinal}`);
+
+      // Envia notificação de resultado pro Telegram
+      const icone = resultadoFinal === 'WIN' ? '✅ WIN TÁ NO BOLSO!' : (resultadoFinal === 'LOSS' ? '❌ LOSS' : '⚪ EMPATE');
+      const ativoFormatado = op.ticker.endsWith('=X') ? op.ticker.substring(0, 3) + '/' + op.ticker.substring(3, 6) : op.ticker.replace('-', '/');
+      
+      const msg = `🧾 *RESULTADO DA OPERAÇÃO* 🧾
+*Ativo:* ${ativoFormatado}
+*Direção:* ${op.sinal === 'COMPRA' ? '🟢 COMPRA' : '🔴 VENDA'}
+
+*Veredito:* ${icone}
+
+💸 *Taxa de Entrada:* ${op.taxa_entrada.toFixed(4)}
+🛑 *Fechamento:* ${precoFechamento.toFixed(4)}`;
+
+      await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text: msg, parse_mode: 'Markdown' })
+      });
+
+      await delay(1000); // Pausa leve para não sobrecarregar o Telegram
+    } catch (e: any) {
+      console.error(`❌ [AUDITORIA] Erro ao verificar operação ${op.id}:`, e.message);
+    }
+  }
+}
+
+// ============================================================================
+// FUNÇÃO DE ENVIO DE SINAL (Botões Manuais Removidos)
+// ============================================================================
 async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: number, rsi: number, padrao: string, stats: any) {
   try {
     const supabase = getSupabaseClient();
@@ -99,27 +175,14 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
     proximaVela.setSeconds(0); proximaVela.setMilliseconds(0);
     const expiracao = new Date(proximaVela); expiracao.setMinutes(expiracao.getMinutes() + 5);
 
-    let operacaoId = null;
-    const { data: insertData, error: insertError } = await supabase
-      .from('historico_operacoes')
-      .insert([{ 
-        ticker: ativo, 
-        sinal: iaData.sinal, 
-        taxa_entrada: precoAtual, 
-        resultado: 'PENDENTE',
-        created_at: new Date().toISOString()
-      }])
-      .select('id')
-      .maybeSingle();
-
-    if (insertError) {
-      console.error("❌ [SUPABASE ERRO]:", insertError.message);
-    } else if (insertData) {
-      operacaoId = insertData.id;
-      console.log(`✅ [SUPABASE] Operação registrada ID: ${operacaoId}`);
-    } else {
-      console.warn("⚠️ [SUPABASE] Registro feito, mas ID não retornado.");
-    }
+    // Salva a operação como PENDENTE. O Robô conferirá o resultado sozinho depois!
+    await supabase.from('historico_operacoes').insert([{ 
+      ticker: ativo, 
+      sinal: iaData.sinal, 
+      taxa_entrada: precoAtual, 
+      resultado: 'PENDENTE',
+      created_at: new Date().toISOString()
+    }]);
 
     let iconeDesempenho = "📊";
     if (stats.taxaAcerto >= 65) iconeDesempenho = "🏆";
@@ -130,6 +193,7 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
 *Ação:* ${iaData.sinal === 'COMPRA' ? '🟢 COMPRA' : '🔴 VENDA'}
 ⏰ *Entrada:* ${formatadorHora.format(proximaVela)}
 ⏳ *Expiração:* ${formatadorHora.format(expiracao)}
+💲 *Preço Atual:* ${precoAtual.toFixed(4)}
 
 ${iconeDesempenho} *Histórico do Ativo:*
 *Acertos:* ${stats.taxaAcerto}% (${stats.wins}W / ${stats.losses}L)
@@ -142,41 +206,30 @@ ${iconeDesempenho} *Histórico do Ativo:*
 📊 *Gatilho Identificado:* ${padrao.replace(/_/g, ' ')}
 🔥 *RSI (Força):* ${rsi.toFixed(2)}
 🧠 *Mapeamento IA:* ${iaData.motivo}
-🎯 *Confiança:* ${iaData.confianca_padrao}`;
+🎯 *Confiança:* ${iaData.confianca_padrao}
+
+_O robô verificará o resultado desta operação automaticamente em 6 minutos._ ⏳`;
     
     const payload: any = { 
       chat_id: TELEGRAM_CHAT_ID, 
       text: mensagem, 
       parse_mode: 'Markdown' 
     };
-
-    if (operacaoId) {
-      payload.reply_markup = { 
-        inline_keyboard: [
-          [{ text: '✅ WIN', callback_data: `WIN_${operacaoId}` }, { text: '❌ LOSS', callback_data: `LOSS_${operacaoId}` }],
-          [{ text: '🗑️ NÃO PEGUEI', callback_data: `DEL_${operacaoId}` }]
-        ] 
-      };
-    } else {
-      console.warn("⚠️ Mensagem enviada sem botões interativos pois operacaoId é nulo.");
-    }
     
-    const resTg = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
 
-    const tgJson = await resTg.json();
-    if (!tgJson.ok) {
-      console.error(`❌ [TELEGRAM ERRO API]:`, tgJson);
-    } else {
-      console.log(`✅ [TELEGRAM] Sinal enviado com sucesso para ${ativo}!`);
-    }
+    console.log(`✅ [TELEGRAM] Sinal enviado com sucesso para ${ativo}!`);
   } catch (error: any) {
     console.error(`❌ [TELEGRAM ERRO CRÍTICO]:`, error.message);
   }
 }
 
+// ============================================================================
+// NÚCLEO DO ROBÔ (EXECUÇÃO PRINCIPAL)
+// ============================================================================
 export async function GET(request: Request) {
   console.log("==========================================");
   console.log("🤖 INICIANDO CICLO DO ROBÔ...");
@@ -192,9 +245,14 @@ export async function GET(request: Request) {
     }
 
     const supabase = getSupabaseClient();
+
+    // 1️⃣ CHAMA O AUDITOR AUTOMÁTICO ANTES DE TUDO
+    // Ele vai conferir as operações antigas que fecharam e te mandar os WINS/LOSS no Telegram
+    await verificarResultadosPendentes(supabase);
+
+    // 2️⃣ SEGUE O FLUXO NORMAL BUSCANDO NOVAS OPORTUNIDADES
     const { data: ativosDB } = await supabase.from('ativos_global').select('ticker').eq('status', 'ativo');
     if (!ativosDB) {
-      console.log("❌ Erro ao buscar ativos no banco de dados.");
       return NextResponse.json({ error: "Erro DB" }, { status: 500 });
     }
     
@@ -283,7 +341,7 @@ export async function GET(request: Request) {
         }
 
         if (bloqueado) {
-            console.log(`⏳ [${ativo}] Pulando: Bloqueio de segurança (Operou recentemente)`);
+            console.log(`⏳ [${ativo}] Pulando: Bloqueio de segurança`);
             continue; 
         }
 
@@ -292,21 +350,9 @@ export async function GET(request: Request) {
           fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=15m&range=2d`, { cache: 'no-store' })
         ]);
 
-        if (!res5m.ok || !res15m.ok) {
-            console.log(`⚠️ [${ativo}] Falha ao buscar dados no Yahoo Finance.`);
-            continue;
-        }
+        if (!res5m.ok || !res15m.ok) continue;
         const json5m = await res5m.json(); const json15m = await res15m.json();
         
-        const timestamps5m = json5m.chart?.result?.[0]?.timestamp;
-        if (!timestamps5m) continue;
-        const lastTime = timestamps5m[timestamps5m.length - 1];
-        const agoraSec = Math.floor(Date.now() / 1000);
-        if (agoraSec - lastTime > 1200) {
-            console.log(`⚠️ [${ativo}] Ativo parece estar sem volume/fechado agora.`);
-            continue; 
-        }
-
         const quote5m = json5m.chart?.result?.[0]?.indicators?.quote?.[0];
         const quote15m = json15m.chart?.result?.[0]?.indicators?.quote?.[0];
         if (!quote5m?.close || !quote15m?.close) continue;
@@ -327,31 +373,14 @@ export async function GET(request: Request) {
         }
 
         const prompt = `Você é o Cérebro de uma IA de Alta Frequência operando ${ativo}.
-Sua missão: Identificar boas oportunidades no fluxo do preço. Seja inteligente e rápido.
-
-🧠 **DADOS DO ATIVO:**
-- Placar: ${taxaAcertoAtual}% (${wins} Wins / ${losses} Losses)
-- Últimos Resultados: ${sequenciaRecente}
-
-📊 **MAPEAMENTO TÉCNICO:**
-- Tendência Macro (M15): ${tendenciaMacro}
-- Força RSI (M5): ${rsi5m.toFixed(2)}
-- Ação de Preço (M5): ${padraoMicro}
-
-**REGRAS DE DECISÃO:**
-1. Fluxo Inteligente: Se houver indícios de força a favor da Tendência Macro ou exaustão técnica, APROVE a entrada.
-2. Se o mercado estiver indeciso ou sem padrão claro, declare NEUTRO.
-
-Retorne EXCLUSIVAMENTE em JSON:
-{"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%", "motivo": "Análise rápida em até 15 palavras."}`;
+🧠 **DADOS:** Placar: ${taxaAcertoAtual}% | T. Macro: ${tendenciaMacro} | RSI: ${rsi5m.toFixed(2)} | Padrão: ${padraoMicro}
+**REGRA:** Fluxo Inteligente. Se mercado indeciso, declare NEUTRO.
+Retorne JSON: {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%", "motivo": "Até 15 palavras."}`;
 
         let iaResposta = null;
         let tentativas = 0;
-        const maxTentativas = 2;
-
-        console.log(`🧠 [${ativo}] Enviando dados para a Inteligência Artificial...`);
-
-        while (tentativas < maxTentativas && !iaResposta) {
+        
+        while (tentativas < 2 && !iaResposta) {
             try {
                 await delay(1000); 
                 const responseGroq = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -363,23 +392,16 @@ Retorne EXCLUSIVAMENTE em JSON:
                         temperature: 0.2 
                     })
                 });
-
                 if (!responseGroq.ok) throw new Error(`Status ${responseGroq.status}`);
                 iaResposta = JSON.parse((await responseGroq.json()).choices[0].message.content.trim());
             } catch (err: any) {
                 tentativas++;
-                console.log(`⚠️ [${ativo}] Falha na IA (${err.message}). Tentativa ${tentativas} de ${maxTentativas}`);
-                if (tentativas < maxTentativas) await delay(2000); 
+                if (tentativas < 2) await delay(2000); 
             }
         }
 
-        if (!iaResposta) {
-            console.log(`❌ [${ativo}] IA não respondeu após várias tentativas.`);
-            continue; 
-        }
-
+        if (!iaResposta) continue; 
         const confiancaNumerica = parseInt(iaResposta.confianca_padrao);
-        console.log(`🎯 [${ativo}] IA Respondeu: SINAL ${iaResposta.sinal} | CONFIANÇA: ${confiancaNumerica}% | MOTIVO: ${iaResposta.motivo}`);
 
         if ((iaResposta.sinal === 'COMPRA' || iaResposta.sinal === 'VENDA') && confiancaNumerica >= 70) {
            torneioDeSinais.push({ 
@@ -388,37 +410,25 @@ Retorne EXCLUSIVAMENTE em JSON:
            });
         }
       } catch (e: any) { 
-          console.error(`💥 [${ativo}] Erro crítico durante processamento:`, e.message);
           continue; 
       }
     }
 
     console.log("==========================================");
     if (torneioDeSinais.length > 0) {
-      console.log(`🏆 TORNEIO FINALIZADO! Tivemos ${torneioDeSinais.length} ativo(s) aprovados pela IA.`);
       torneioDeSinais.sort((a, b) => b.confianca - a.confianca);
       const alvo = torneioDeSinais[0];
-      
-      console.log(`🥇 VENCEDOR: ${alvo.ativo} com ${alvo.confianca}% de confiança. Enviando para o Telegram...`);
       await enviarSinalTelegram(alvo.ativo, alvo.ia, alvo.precoAtual, alvo.rsi, alvo.padrao, alvo.stats);
     } else {
-      console.log(`🛑 FIM DA RODADA: Nenhum sinal atingiu a confiança mínima de 70%. Aguardando próximo ciclo.`);
+      console.log(`🛑 Nenhum sinal com 70%+ de confiança.`);
     }
     console.log("==========================================\n");
 
     if (horaSP.getHours() === 23 && horaSP.getMinutes() >= 50) {
-      console.log("📊 Horário de Relatório Diário atingido. Enviando para o Telegram...");
       const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
       const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
       
-      const msgRelatorio = `📊 *FECHAMENTO DIÁRIO DO BOT* 📊
-      
-*Status Geral do Dia:* ${statusBot}
-*Placar Total:* ${globalWins} WINS ✅ | ${globalLosses} LOSSES ❌
-*Taxa de Acerto Hoje:* ${taxaAcertoDiaria}% 🎯
-*Total de Operações:* ${totalOpsDiaria}
-
-_Modo de Aprendizado Contínuo. O sistema estará pronto para operar amanhã!_ 🚀`;
+      const msgRelatorio = `📊 *FECHAMENTO DIÁRIO DO BOT* 📊\n*Status:* ${statusBot}\n*Placar:* ${globalWins} WINS ✅ | ${globalLosses} LOSSES ❌\n*Taxa Acerto:* ${taxaAcertoDiaria}% 🎯\n\n_Sistema 100% Automático!_ 🚀`;
       
       await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -426,9 +436,9 @@ _Modo de Aprendizado Contínuo. O sistema estará pronto para operar amanhã!_ �
       });
     }
 
-    return NextResponse.json({ success: true, mensagem: `Análise finalizada. Logs gerados com sucesso.` });
+    return NextResponse.json({ success: true, mensagem: `Análise e Auditoria finalizadas com sucesso.` });
   } catch (error: any) {
-    console.error("❌ ERRO FATAL NA EXECUÇÃO:", error);
+    console.error("❌ ERRO FATAL:", error);
     return NextResponse.json({ error: "Erro interno" }, { status: 500 });
   }
 }
