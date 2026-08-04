@@ -17,7 +17,7 @@ const getSupabaseClient = () => {
   });
 };
 
-// --- FUNÇÃO AUXILIAR DE DELAY (ANTIBLOQUEIO GROQ) ---
+// --- FUNÇÃO AUXILIAR DE DELAY ---
 const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
 
 // --- FILTRO DE HORÁRIO ---
@@ -103,17 +103,21 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
     proximaVela.setSeconds(0); proximaVela.setMilliseconds(0);
     const expiracao = new Date(proximaVela); expiracao.setMinutes(expiracao.getMinutes() + 5);
 
-    const { data: insertData, error: insertError } = await supabase.from('historico_operacoes')
-      .insert([{ 
-        ticker: ativo, 
-        sinal: iaData.sinal, 
-        taxa_entrada: precoAtual, 
-        resultado: 'PENDENTE',
-        created_at: new Date().toISOString()
-      }])
-      .select('id').single();
-
-    if (insertError || !insertData) return;
+    let operacaoId = null;
+    try {
+      const { data: insertData } = await supabase.from('historico_operacoes')
+        .insert([{ 
+          ticker: ativo, 
+          sinal: iaData.sinal, 
+          taxa_entrada: precoAtual, 
+          resultado: 'PENDENTE',
+          created_at: new Date().toISOString()
+        }])
+        .select('id').single();
+      if (insertData) operacaoId = insertData.id;
+    } catch (dbErr: any) {
+      console.error("⚠️ Aviso: Falha ao registrar no Supabase antes do envio:", dbErr.message);
+    }
 
     let iconeDesempenho = "📊";
     if (stats.taxaAcerto >= 65) iconeDesempenho = "🏆";
@@ -138,21 +142,34 @@ ${iconeDesempenho} *Histórico do Ativo:*
 🧠 *Mapeamento IA:* ${iaData.motivo}
 🎯 *Confiança:* ${iaData.confianca_padrao}`;
     
-    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    const payload: any = { 
+      chat_id: TELEGRAM_CHAT_ID, 
+      text: mensagem, 
+      parse_mode: 'Markdown' 
+    };
+
+    if (operacaoId) {
+      payload.reply_markup = { 
+        inline_keyboard: [
+          [{ text: '✅ WIN', callback_data: `WIN_${operacaoId}` }, { text: '❌ LOSS', callback_data: `LOSS_${operacaoId}` }],
+          [{ text: '🗑️ NÃO PEGUEI', callback_data: `DEL_${operacaoId}` }]
+        ] 
+      };
+    }
+    
+    const resTg = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 
-        chat_id: TELEGRAM_CHAT_ID, text: mensagem, parse_mode: 'Markdown', 
-        reply_markup: { 
-          inline_keyboard: [
-            [{ text: '✅ WIN', callback_data: `WIN_${insertData.id}` }, { text: '❌ LOSS', callback_data: `LOSS_${insertData.id}` }],
-            [{ text: '🗑️ NÃO PEGUEI', callback_data: `DEL_${insertData.id}` }]
-          ] 
-        } 
-      }),
+      body: JSON.stringify(payload),
     });
-    console.log(`✅ [TELEGRAM] Sinal enviado com sucesso para ${ativo}!`);
+
+    const tgJson = await resTg.json();
+    if (!tgJson.ok) {
+      console.error(`❌ [TELEGRAM ERRO API]:`, tgJson);
+    } else {
+      console.log(`✅ [TELEGRAM] Sinal enviado com sucesso para ${ativo}!`);
+    }
   } catch (error: any) {
-    console.error(`❌ [TELEGRAM ERRO] Falha ao enviar sinal para ${ativo}:`, error.message);
+    console.error(`❌ [TELEGRAM ERRO CRÍTICO]:`, error.message);
   }
 }
 
@@ -183,11 +200,11 @@ export async function GET(request: Request) {
 
     console.log(`📋 Total de ativos abertos no momento: ${ativosAtivos.length}`);
 
-    // --- OTIMIZAÇÃO GROQ: ROLETA DE 8 ATIVOS ---
+    // --- ROLETA DE 6 ATIVOS PARA VELOCIDADE MÁXIMA ---
     ativosAtivos.sort(() => Math.random() - 0.5);
-    ativosAtivos = ativosAtivos.slice(0, 8); // Reduzido de 12 para 8
+    ativosAtivos = ativosAtivos.slice(0, 6);
     
-    console.log(`🎰 Sorteados 8 ativos para esta rodada: ${ativosAtivos.join(', ')}`);
+    console.log(`🎰 Sorteados 6 ativos para esta rodada: ${ativosAtivos.join(', ')}`);
 
     const torneioDeSinais = [];
     const agoraUtcMs = new Date().getTime(); 
@@ -309,7 +326,7 @@ export async function GET(request: Request) {
         }
 
         const prompt = `Você é o Cérebro de uma IA de Alta Frequência operando ${ativo}.
-Sua missão: Identificar boas oportunidades no fluxo do preço. Seja inteligente, mas não tenha medo de operar. Agressividade calculada é o foco.
+Sua missão: Identificar boas oportunidades no fluxo do preço. Seja inteligente e rápido.
 
 🧠 **DADOS DO ATIVO:**
 - Placar: ${taxaAcertoAtual}% (${wins} Wins / ${losses} Losses)
@@ -320,15 +337,14 @@ Sua missão: Identificar boas oportunidades no fluxo do preço. Seja inteligente
 - Força RSI (M5): ${rsi5m.toFixed(2)}
 - Ação de Preço (M5): ${padraoMicro}
 
-**REGRAS FLEXÍVEIS DE DECISÃO:**
-1. Fluxo Inteligente: Se houver indícios de força a favor da Tendência Macro, assuma o risco e APROVE a entrada.
-2. Memória Adaptativa: Se a última operação foi LOSS, não se paralise. Apenas busque um gatilho de preço um pouco mais claro.
-3. Se o mercado estiver totalmente indeciso, declare NEUTRO.
+**REGRAS DE DECISÃO:**
+1. Fluxo Inteligente: Se houver indícios de força a favor da Tendência Macro ou exaustão técnica, APROVE a entrada.
+2. Se o mercado estiver indeciso ou sem padrão claro, declare NEUTRO.
 
 Retorne EXCLUSIVAMENTE em JSON:
-{"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%", "motivo": "Análise rápida e direta em até 15 palavras."}`;
+{"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%", "motivo": "Análise rápida em até 15 palavras."}`;
 
-        // --- SISTEMA ANTIBLOQUEIO (DELAY + RETRY NO GROQ) ---
+        // --- SISTEMA OTIMIZADO GROQ (MODELO INSTANTÂNEO) ---
         let iaResposta = null;
         let tentativas = 0;
         const maxTentativas = 2;
@@ -337,15 +353,14 @@ Retorne EXCLUSIVAMENTE em JSON:
 
         while (tentativas < maxTentativas && !iaResposta) {
             try {
-                // Aumento estratégico do delay primário para 3 segundos
-                await delay(3000); 
+                await delay(1000); 
                 const responseGroq = await fetch('https://api.groq.com/openai/v1/chat/completions', {
                     method: 'POST', headers: { 'Authorization': `Bearer ${GROQ_BOT_KEY}`, 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        model: 'llama-3.3-70b-versatile', 
+                        model: 'llama-3.1-8b-instant', // <--- MODELO RÁPIDO E SEM LIMITES RÍGIDOS DE RATE-LIMIT
                         messages: [{ role: 'user', content: prompt }],
                         response_format: { type: 'json_object' }, 
-                        temperature: 0.3 
+                        temperature: 0.2 
                     })
                 });
 
@@ -354,8 +369,7 @@ Retorne EXCLUSIVAMENTE em JSON:
             } catch (err: any) {
                 tentativas++;
                 console.log(`⚠️ [${ativo}] Falha na IA (${err.message}). Tentativa ${tentativas} de ${maxTentativas}`);
-                // Se falhar (erro 429), pausa maior de 5 segundos antes de tentar de novo
-                if (tentativas < maxTentativas) await delay(5000); 
+                if (tentativas < maxTentativas) await delay(2000); 
             }
         }
 
@@ -367,7 +381,7 @@ Retorne EXCLUSIVAMENTE em JSON:
         const confiancaNumerica = parseInt(iaResposta.confianca_padrao);
         console.log(`🎯 [${ativo}] IA Respondeu: SINAL ${iaResposta.sinal} | CONFIANÇA: ${confiancaNumerica}% | MOTIVO: ${iaResposta.motivo}`);
 
-        // --- SISTEMA DE CONFIANÇA (Definido para >= 70) ---
+        // --- SISTEMA DE CONFIANÇA (>= 70%) ---
         if ((iaResposta.sinal === 'COMPRA' || iaResposta.sinal === 'VENDA') && confiancaNumerica >= 70) {
            torneioDeSinais.push({ 
                ativo, ia: iaResposta, precoAtual, rsi: rsi5m, padrao: padraoMicro, confianca: confiancaNumerica, 
