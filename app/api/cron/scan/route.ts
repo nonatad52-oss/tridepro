@@ -20,7 +20,7 @@ const getSupabaseClient = () => {
 const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
 
 // ============================================================================
-// NOVA BLINDAGEM DE HORÁRIOS DOS MERCADOS
+// BLINDAGEM DE HORÁRIOS DOS MERCADOS (ATUALIZADA)
 // ============================================================================
 function isMercadoAberto(ticker: string, dataHora: Date) {
   const dia = dataHora.getDay(); // 0 = Dom, 1 = Seg, ..., 5 = Sex, 6 = Sáb
@@ -29,33 +29,43 @@ function isMercadoAberto(ticker: string, dataHora: Date) {
   const tempoDecimal = hora + (minuto / 60);
   
   const isFimDeSemana = (dia === 0 || dia === 6);
+  const tickerUpper = ticker.toUpperCase();
 
-  // 1. Criptomoedas (24 horas, 7 dias por semana)
-  if (ticker.endsWith('-USD')) return true; 
+  // 1. IDENTIFICADOR INTELIGENTE DE FOREX (Evita confundir AUD-USD com Cripto)
+  // Lista das principais moedas de países (Moedas Fiat)
+  const moedasFiat = ['EUR', 'GBP', 'AUD', 'NZD', 'CAD', 'CHF', 'JPY', 'USD'];
+  const comecaComFiat = moedasFiat.some(moeda => tickerUpper.startsWith(moeda));
+  
+  // É Forex se terminar em =X ou se terminar em -USD mas for moeda de país (ex: AUD-USD)
+  const isForex = tickerUpper.endsWith('=X') || (tickerUpper.endsWith('USD') && comecaComFiat);
 
-  // 2. Ações Brasileiras (.SA) -> Abertas das 10:00 às 17:30 (Horário BR)
-  if (ticker.endsWith('.SA')) {
-    if (isFimDeSemana) return false;
-    if (tempoDecimal < 10 || tempoDecimal >= 17.5) return false;
-    return true;
-  }
+  if (isForex) {
+    // Fim de semana Forex (Fecha Sexta 18:00, Abre Domingo 18:00 BRT)
+    if (dia === 5 && tempoDecimal >= 18) return false; 
+    if (dia === 6) return false; 
+    if (dia === 0 && tempoDecimal < 18) return false; 
 
-  // 3. Forex (Pares de moedas como EURJPY=X, EURUSD=X)
-  if (ticker.endsWith('=X')) {
-    // Fim de semana estendido do Forex: Fecha Sexta 18:00, Abre Domingo 18:00
-    if (dia === 5 && tempoDecimal >= 18) return false; // Sexta pós 18h
-    if (dia === 6) return false; // Sábado o dia todo
-    if (dia === 0 && tempoDecimal < 18) return false; // Domingo antes das 18h
-
-    // ZONA MORTA DIÁRIA (Rollover de mercado entre 18h e 19h BRT)
+    // ZONA MORTA DIÁRIA (Rollover do mercado entre 18h e 19h BRT)
     if (tempoDecimal >= 18 && tempoDecimal < 19) return false;
 
     return true;
   }
 
-  // 4. Default de Segurança (Para qualquer outro ativo desconhecido)
+  // 2. CRIPTOMOEDAS REAIS (BTC, ETH, etc) - Abertas 24/7
+  // Só entra aqui se terminar em -USD e NÃO for moeda Fiat
+  if (tickerUpper.endsWith('-USD')) {
+    return true; 
+  }
+
+  // 3. AÇÕES BRASILEIRAS (.SA) -> Abertas das 10:00 às 17:30 BRT
+  if (tickerUpper.endsWith('.SA')) {
+    if (isFimDeSemana) return false;
+    if (tempoDecimal < 10 || tempoDecimal >= 17.5) return false;
+    return true;
+  }
+
+  // 4. Default de Segurança
   if (isFimDeSemana) return false;
-  
   return true; 
 }
 
