@@ -19,19 +19,43 @@ const getSupabaseClient = () => {
 
 const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
 
+// ============================================================================
+// NOVA BLINDAGEM DE HORÁRIOS DOS MERCADOS
+// ============================================================================
 function isMercadoAberto(ticker: string, dataHora: Date) {
-  const dia = dataHora.getDay(); 
+  const dia = dataHora.getDay(); // 0 = Dom, 1 = Seg, ..., 5 = Sex, 6 = Sáb
   const hora = dataHora.getHours();
   const minuto = dataHora.getMinutes();
   const tempoDecimal = hora + (minuto / 60);
   
-  if (ticker.endsWith('-USD')) return true; 
   const isFimDeSemana = (dia === 0 || dia === 6);
+
+  // 1. Criptomoedas (24 horas, 7 dias por semana)
+  if (ticker.endsWith('-USD')) return true; 
+
+  // 2. Ações Brasileiras (.SA) -> Abertas das 10:00 às 17:30 (Horário BR)
   if (ticker.endsWith('.SA')) {
     if (isFimDeSemana) return false;
     if (tempoDecimal < 10 || tempoDecimal >= 17.5) return false;
     return true;
   }
+
+  // 3. Forex (Pares de moedas como EURJPY=X, EURUSD=X)
+  if (ticker.endsWith('=X')) {
+    // Fim de semana estendido do Forex: Fecha Sexta 18:00, Abre Domingo 18:00
+    if (dia === 5 && tempoDecimal >= 18) return false; // Sexta pós 18h
+    if (dia === 6) return false; // Sábado o dia todo
+    if (dia === 0 && tempoDecimal < 18) return false; // Domingo antes das 18h
+
+    // ZONA MORTA DIÁRIA (Rollover de mercado entre 18h e 19h BRT)
+    if (tempoDecimal >= 18 && tempoDecimal < 19) return false;
+
+    return true;
+  }
+
+  // 4. Default de Segurança (Para qualquer outro ativo desconhecido)
+  if (isFimDeSemana) return false;
+  
   return true; 
 }
 
@@ -224,11 +248,13 @@ export async function GET(request: Request) {
     
     let ativosBrutos = ativosDB.map(a => a.ticker).filter(a => !a.toUpperCase().includes('OTC'));
     const horaSP = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
+    
+    // Lista de ativos filtrada pela nova função corretíssima de horário comercial
     let ativosAtivos = ativosBrutos.filter(ativo => isMercadoAberto(ativo, horaSP));
 
     console.log(`📋 Total de ativos abertos no momento: ${ativosAtivos.length}`);
 
-    // 3️⃣ OTIMIZAÇÃO 1: CARREGAMENTO EM LOTE DO BANCO (Evita centenas de queries soltas)
+    // 3️⃣ CARREGAMENTO EM LOTE DO BANCO (Evita centenas de queries soltas)
     const { data: todasOperacoes } = await supabase
       .from('historico_operacoes')
       .select('ticker, resultado, created_at')
@@ -262,11 +288,11 @@ export async function GET(request: Request) {
     const taxaAcertoDiaria = totalOpsDiaria > 0 ? Math.round((globalWins / totalOpsDiaria) * 100) : 0;
     const statusBot = saldoDiario > 0 ? "🟢 POSITIVO" : (saldoDiario < 0 ? "🔴 NEGATIVO" : "⚪ ZERO");
 
-    // 4️⃣ OTIMIZAÇÃO 2: PROCESSAMENTO PARALELO EM LOTES (BATCHES DE 6 EM 6)
+    // 4️⃣ PROCESSAMENTO PARALELO EM LOTES (BATCHES DE 6 EM 6)
     const TAMANHO_LOTE = 6;
     
     for (let i = 0; i < ativosAtivos.length; i += TAMANHO_LOTE) {
-      // TRAVA DE SEGURANÇA: Se a execução atingir 48 segundos, para a varredura para não dar timeout
+      // TRAVA DE SEGURANÇA: Se a execução atingir 48 segundos, para a varredura
       if (Date.now() - inicioExecucao > 48000) {
         console.log(`⏱️ [TRAVA DE SEGURANÇA] Interrompendo varredura em 48s para evitar Timeout. Analisados: ${i}/${ativosAtivos.length}`);
         break;
@@ -333,7 +359,7 @@ export async function GET(request: Request) {
 
           const rsi5m = calcularRSI(velas5m);
 
-          // 🛡️ FILTRO 2: DESCARTE RÁPIDO DE ZONA MORTA (Economiza tempo e chamadas à IA)
+          // 🛡️ FILTRO 2: DESCARTE RÁPIDO DE ZONA MORTA
           if (rsi5m > 35 && rsi5m < 65) {
             console.log(`🛡️ [RSI NEUTRO] ${ativo} ignorado. RSI atual: ${rsi5m.toFixed(2)}`);
             return;
@@ -391,7 +417,6 @@ Retorne JSON EXATO: {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao":
             });
           }
         } catch (e: any) { 
-          // Falhas individuais de um ativo não travam os demais
           return; 
         }
       }));
@@ -410,7 +435,6 @@ Retorne JSON EXATO: {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao":
     }
     console.log("==========================================\n");
 
-    // Relatório de Fechamento Diário (23:50)
     if (horaSP.getHours() === 23 && horaSP.getMinutes() >= 50) {
       const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
       const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
