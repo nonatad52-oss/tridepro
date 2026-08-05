@@ -275,7 +275,7 @@ export async function GET(request: Request) {
         const totalResolvido = wins + losses;
         const taxaAcertoAtual = totalResolvido > 0 ? Math.round((wins / totalResolvido) * 100) : 0;
 
-        // 🛡️ FILTRO DE SEGURANÇA 1: BLOQUEIO POR HISTÓRICO RUIM (Corte Rápido de Loss)
+        // 🛡️ FILTRO DE SEGURANÇA 1: BLOQUEIO POR HISTÓRICO RUIM
         if (totalResolvido >= 4 && taxaAcertoAtual < 55) {
             console.log(`🩸 [BLOQUEIO] ${ativo} com acerto de ${taxaAcertoAtual}%. Ignorando.`);
             continue;
@@ -332,14 +332,14 @@ export async function GET(request: Request) {
 
         const rsi5m = calcularRSI(velas5m);
 
-        // 🛡️ FILTRO DE SEGURANÇA 2: BLOQUEIO DE ZONA MORTA (Sem força de mercado)
+        // 🛡️ FILTRO DE SEGURANÇA 2: BLOQUEIO DE ZONA MORTA
         if (rsi5m > 35 && rsi5m < 65) {
             console.log(`🛡️ [RSI NEUTRO] ${ativo} ignorado. RSI atual: ${rsi5m.toFixed(2)} (Falta força)`);
             continue;
         }
 
         const ema20_M15 = calcularEMA(velas15m, 20);
-        const padraoMicro = identifyingPadraoCandle(velas5m) || identificarPadraoCandle(velas5m);
+        const padraoMicro = identificarPadraoCandle(velas5m);
         const precoAtual = velas5m[velas5m.length - 1].fechamento;
 
         let tendenciaMacro = "LATERAL";
@@ -348,7 +348,7 @@ export async function GET(request: Request) {
           else if (velas15m[velas15m.length - 1].fechamento < ema20_M15) tendenciaMacro = "BAIXA";
         }
 
-        // 🛡️ FILTRO DE SEGURANÇA 3: PROMPT MATEMÁTICO (Frio e calculista)
+        // 🛡️ FILTRO DE SEGURANÇA 3: PROMPT MATEMÁTICO
         const prompt = `Você é um Analista Quant EXTREMAMENTE RIGOROSO operando ${ativo}.
 🧠 DADOS: Placar: ${taxaAcertoAtual}% | T. Macro: ${tendenciaMacro} | RSI: ${rsi5m.toFixed(2)} | Padrão: ${padraoMicro}
 
@@ -370,7 +370,7 @@ Retorne JSON EXATO: {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao":
                         model: 'llama-3.1-8b-instant',
                         messages: [{ role: 'user', content: prompt }],
                         response_format: { type: 'json_object' }, 
-                        temperature: 0.1 // Temperatura mínima = Zero alucinação
+                        temperature: 0.1
                     })
                 });
                 if (!responseGroq.ok) throw new Error(`Status ${responseGroq.status}`);
