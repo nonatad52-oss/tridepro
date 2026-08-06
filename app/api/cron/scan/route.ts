@@ -106,44 +106,91 @@ function identificarPadraoCandle(velas: any[]) {
 }
 
 // ============================================================================
-// MÓDULO: AUDITORIA AUTOMÁTICA DE RESULTADOS (WIN / LOSS)
+// MÓDULO: AUDITORIA AUTOMÁTICA DE RESULTADOS (CORRIGIDO PARA M5 EXATO)
 // ============================================================================
 async function verificarResultadosPendentes(supabase: any) {
-  const tempoLimite = new Date(Date.now() - 6 * 60 * 1000).toISOString();
-  
   const { data: pendentes } = await supabase
     .from('historico_operacoes')
     .select('*')
-    .eq('resultado', 'PENDENTE')
-    .lt('created_at', tempoLimite);
+    .eq('resultado', 'PENDENTE');
 
   if (!pendentes || pendentes.length === 0) return;
 
+  const agora = Date.now();
   const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
   const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
 
   for (const op of pendentes) {
     try {
-      const res = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${op.ticker}?interval=1m&range=1d`, { cache: 'no-store' });
+      // 1. Descobre o horário exato da vela de 5 minutos operada
+      const dataSinal = new Date(op.created_at);
+      const minutosSinal = dataSinal.getMinutes();
+      const minutosRestantes = 5 - (minutosSinal % 5);
+      
+      const dataEntrada = new Date(dataSinal);
+      dataEntrada.setMinutes(minutosSinal + minutosRestantes);
+      dataEntrada.setSeconds(0);
+      dataEntrada.setMilliseconds(0);
+
+      const tempoExpiracao = dataEntrada.getTime() + (5 * 60 * 1000); // 5 minutos após a entrada
+
+      // 2. Só audita se a vela de expiração JÁ FECHOU (+ 1 min de margem)
+      if (agora < tempoExpiracao + 60000) {
+        continue; 
+      }
+
+      // 3. Puxa exclusivamente o gráfico de Velas M5
+      const res = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${op.ticker}?interval=5m&range=1d`, { cache: 'no-store' });
       if (!res.ok) continue;
       const json = await res.json();
       
+      const timestampArray = json.chart?.result?.[0]?.timestamp;
       const quote = json.chart?.result?.[0]?.indicators?.quote?.[0];
-      if (!quote || !quote.close) continue;
-
-      const precoFechamento = quote.close[quote.close.length - 1];
       
-      let resultadoFinal = 'LOSS';
-      if (op.sinal === 'COMPRA' && precoFechamento > op.taxa_entrada) resultadoFinal = 'WIN';
-      if (op.sinal === 'VENDA' && precoFechamento < op.taxa_entrada) resultadoFinal = 'WIN';
-      if (precoFechamento === op.taxa_entrada) resultadoFinal = 'EMPATE';
+      if (!timestampArray || !quote || !quote.close || !quote.open) continue;
 
+      // 4. Encontra a VELA EXATA da operação através do Timestamp
+      const targetTimestamp = Math.floor(dataEntrada.getTime() / 1000);
+      let targetIndex = -1;
+
+      for (let i = timestampArray.length - 1; i >= 0; i--) {
+        if (Math.abs(timestampArray[i] - targetTimestamp) <= 120) {
+          targetIndex = i;
+          break;
+        }
+      }
+
+      // Se passou muito tempo e o mercado não registrou a vela, cancela
+      if (targetIndex === -1) {
+        if (agora > tempoExpiracao + (120 * 60 * 1000)) {
+          await supabase.from('historico_operacoes').update({ resultado: 'CANCELADO' }).eq('id', op.id);
+        }
+        continue;
+      }
+
+      // 5. Calcula o Resultado com base na ABERTURA vs FECHAMENTO da própria vela M5
+      const precoAbertura = quote.open[targetIndex];
+      const precoFechamento = quote.close[targetIndex];
+
+      if (precoAbertura == null || precoFechamento == null) continue;
+
+      let resultadoFinal = 'LOSS';
+      if (op.sinal === 'COMPRA' && precoFechamento > precoAbertura) resultadoFinal = 'WIN';
+      if (op.sinal === 'VENDA' && precoFechamento < precoAbertura) resultadoFinal = 'WIN';
+      if (precoFechamento === precoAbertura) resultadoFinal = 'EMPATE';
+
+      // 6. Atualiza o banco de dados
       await supabase.from('historico_operacoes').update({ resultado: resultadoFinal }).eq('id', op.id);
       
+      // 7. Configurações visuais (Ajusta casas decimais)
+      let casasDecimais = 2;
+      if (precoAbertura < 10) casasDecimais = 5; 
+      else if (precoAbertura < 1000) casasDecimais = 3; 
+
       const icone = resultadoFinal === 'WIN' ? '✅ WIN TÁ NO BOLSO!' : (resultadoFinal === 'LOSS' ? '❌ LOSS' : '⚪ EMPATE');
       const ativoFormatado = op.ticker.endsWith('=X') ? op.ticker.substring(0, 3) + '/' + op.ticker.substring(3, 6) : op.ticker.replace('-', '/');
       
-      const msg = `🧾 *RESULTADO DA OPERAÇÃO* 🧾\n*Ativo:* ${ativoFormatado}\n*Direção:* ${op.sinal === 'COMPRA' ? '🟢 COMPRA' : '🔴 VENDA'}\n\n*Veredito:* ${icone}\n\n💸 *Taxa de Entrada:* ${op.taxa_entrada.toFixed(4)}\n🛑 *Fechamento:* ${precoFechamento.toFixed(4)}`;
+      const msg = `🧾 *RESULTADO DA OPERAÇÃO* 🧾\n*Ativo:* ${ativoFormatado}\n*Direção:* ${op.sinal === 'COMPRA' ? '🟢 COMPRA' : '🔴 VENDA'}\n\n*Veredito:* ${icone}\n\n💸 *Abertura (Vela M5):* ${precoAbertura.toFixed(casasDecimais)}\n🛑 *Fechamento (Vela M5):* ${precoFechamento.toFixed(casasDecimais)}`;
 
       await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -184,7 +231,7 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
     if (stats.taxaAcerto >= 65) iconeDesempenho = "🏆";
     else if (stats.taxaAcerto <= 45 && stats.totalOps > 0) iconeDesempenho = "⚠️";
 
-    const mensagem = `🤖 *SINAL IA - INTELIGÊNCIA AGRESSIVA* 🤖\n*Ativo:* ${ativoFormatado}\n*Ação:* ${iaData.sinal === 'COMPRA' ? '🟢 COMPRA' : '🔴 VENDA'}\n⏰ *Entrada:* ${formatadorHora.format(proximaVela)}\n⏳ *Expiração:* ${formatadorHora.format(expiracao)}\n💲 *Preço Atual:* ${precoAtual.toFixed(4)}\n\n${iconeDesempenho} *Histórico do Ativo:*\n*Acertos:* ${stats.taxaAcerto}% (${stats.wins}W / ${stats.losses}L)\n\n🌐 *PLACAR DO DIA (BOT):*\n*Status:* ${stats.statusBot}\n*Acertos Hoje:* ${stats.taxaAcertoDiaria}% 🎯\n*Total:* ${stats.globalWins} WINS ✅ / ${stats.globalLosses} LOSSES ❌\n\n📊 *Gatilho Identificado:* ${padrao.replace(/_/g, ' ')}\n🔥 *RSI (Força):* ${rsi.toFixed(2)}\n🧠 *Mapeamento IA:* ${iaData.motivo}\n🎯 *Confiança:* ${iaData.confianca_padrao}\n\n_O robô verificará o resultado desta operação automaticamente em 6 minutos._ ⏳`;
+    const mensagem = `🤖 *SINAL IA - INTELIGÊNCIA AGRESSIVA* 🤖\n*Ativo:* ${ativoFormatado}\n*Ação:* ${iaData.sinal === 'COMPRA' ? '🟢 COMPRA' : '🔴 VENDA'}\n⏰ *Entrada:* ${formatadorHora.format(proximaVela)}\n⏳ *Expiração:* ${formatadorHora.format(expiracao)}\n💲 *Preço Atual:* ${precoAtual.toFixed(4)}\n\n${iconeDesempenho} *Histórico do Ativo:*\n*Acertos:* ${stats.taxaAcerto}% (${stats.wins}W / ${stats.losses}L)\n\n🌐 *PLACAR DO DIA (BOT):*\n*Status:* ${stats.statusBot}\n*Acertos Hoje:* ${stats.taxaAcertoDiaria}% 🎯\n*Total:* ${stats.globalWins} WINS ✅ / ${stats.globalLosses} LOSSES ❌\n\n📊 *Gatilho Identificado:* ${padrao.replace(/_/g, ' ')}\n🔥 *RSI (Força):* ${rsi.toFixed(2)}\n🧠 *Mapeamento IA:* ${iaData.motivo}\n🎯 *Confiança:* ${iaData.confianca_padrao}\n\n_O robô verificará o resultado desta operação após o fechamento da vela M5._ ⏳`;
     
     const payload: any = { chat_id: TELEGRAM_CHAT_ID, text: mensagem, parse_mode: 'Markdown' };
     
@@ -201,7 +248,7 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
 export async function GET(request: Request) {
   const inicioExecucao = Date.now();
   console.log("==========================================");
-  console.log("🤖 INICIANDO CICLO COM MEMÓRIA DE LOSS...");
+  console.log("🤖 INICIANDO CICLO COM MEMÓRIA DE LOSS E M5 AUDITORIA...");
 
   try {
     const CRON_SECRET = process.env.CRON_SECRET || '17a85b09'; 
