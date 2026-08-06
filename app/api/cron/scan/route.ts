@@ -122,7 +122,6 @@ async function verificarResultadosPendentes(supabase: any) {
 
   for (const op of pendentes) {
     try {
-      // 1. Descobre o horário exato da vela de 5 minutos operada
       const dataSinal = new Date(op.created_at);
       const minutosSinal = dataSinal.getMinutes();
       const minutosRestantes = 5 - (minutosSinal % 5);
@@ -132,14 +131,10 @@ async function verificarResultadosPendentes(supabase: any) {
       dataEntrada.setSeconds(0);
       dataEntrada.setMilliseconds(0);
 
-      const tempoExpiracao = dataEntrada.getTime() + (5 * 60 * 1000); // 5 minutos após a entrada
+      const tempoExpiracao = dataEntrada.getTime() + (5 * 60 * 1000); 
 
-      // 2. Só audita se a vela de expiração JÁ FECHOU (+ 1 min de margem)
-      if (agora < tempoExpiracao + 60000) {
-        continue; 
-      }
+      if (agora < tempoExpiracao + 60000) continue; 
 
-      // 3. Puxa exclusivamente o gráfico de Velas M5
       const res = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${op.ticker}?interval=5m&range=1d`, { cache: 'no-store' });
       if (!res.ok) continue;
       const json = await res.json();
@@ -149,7 +144,6 @@ async function verificarResultadosPendentes(supabase: any) {
       
       if (!timestampArray || !quote || !quote.close || !quote.open) continue;
 
-      // 4. Encontra a VELA EXATA da operação através do Timestamp
       const targetTimestamp = Math.floor(dataEntrada.getTime() / 1000);
       let targetIndex = -1;
 
@@ -160,7 +154,6 @@ async function verificarResultadosPendentes(supabase: any) {
         }
       }
 
-      // Se passou muito tempo e o mercado não registrou a vela, cancela
       if (targetIndex === -1) {
         if (agora > tempoExpiracao + (120 * 60 * 1000)) {
           await supabase.from('historico_operacoes').update({ resultado: 'CANCELADO' }).eq('id', op.id);
@@ -168,7 +161,6 @@ async function verificarResultadosPendentes(supabase: any) {
         continue;
       }
 
-      // 5. Calcula o Resultado com base na ABERTURA vs FECHAMENTO da própria vela M5
       const precoAbertura = quote.open[targetIndex];
       const precoFechamento = quote.close[targetIndex];
 
@@ -179,10 +171,8 @@ async function verificarResultadosPendentes(supabase: any) {
       if (op.sinal === 'VENDA' && precoFechamento < precoAbertura) resultadoFinal = 'WIN';
       if (precoFechamento === precoAbertura) resultadoFinal = 'EMPATE';
 
-      // 6. Atualiza o banco de dados
       await supabase.from('historico_operacoes').update({ resultado: resultadoFinal }).eq('id', op.id);
       
-      // 7. Configurações visuais (Ajusta casas decimais)
       let casasDecimais = 2;
       if (precoAbertura < 10) casasDecimais = 5; 
       else if (precoAbertura < 1000) casasDecimais = 3; 
@@ -243,12 +233,12 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
 }
 
 // ============================================================================
-// NÚCLEO DO ROBÔ (MEMÓRIA DE ERROS E EXCLUSÃO DE ATIVOS)
+// NÚCLEO DO ROBÔ (MODO RAIO-X REATIVADO E IA AJUSTADA)
 // ============================================================================
 export async function GET(request: Request) {
   const inicioExecucao = Date.now();
   console.log("==========================================");
-  console.log("🤖 INICIANDO CICLO COM MEMÓRIA DE LOSS E M5 AUDITORIA...");
+  console.log("🤖 INICIANDO CICLO (MODO RAIO-X ATIVADO) ...");
 
   try {
     const CRON_SECRET = process.env.CRON_SECRET || '17a85b09'; 
@@ -259,6 +249,7 @@ export async function GET(request: Request) {
     }
 
     const supabase = getSupabaseClient();
+    console.log("🔍 Verificando operações pendentes (Auditoria M5)...");
     await verificarResultadosPendentes(supabase);
 
     const { data: ativosDB } = await supabase.from('ativos_global').select('ticker').eq('status', 'ativo');
@@ -268,6 +259,7 @@ export async function GET(request: Request) {
     const horaSP = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
     
     let ativosAtivos = ativosBrutos.filter(ativo => isMercadoAberto(ativo, horaSP));
+    console.log(`📡 Ativos abertos no mercado agora: ${ativosAtivos.length}`);
 
     const { data: todasOperacoes } = await supabase
       .from('historico_operacoes')
@@ -303,12 +295,16 @@ export async function GET(request: Request) {
     const TAMANHO_LOTE = 6;
     
     for (let i = 0; i < ativosAtivos.length; i += TAMANHO_LOTE) {
-      if (Date.now() - inicioExecucao > 48000) break;
+      if (Date.now() - inicioExecucao > 48000) {
+        console.log("⚠️ Limite de tempo Vercel se aproximando. Interrompendo lote.");
+        break;
+      }
 
       const loteAtual = ativosAtivos.slice(i, i + TAMANHO_LOTE);
 
       await Promise.all(loteAtual.map(async (ativo) => {
         try {
+          console.log(`\n🔎 [RAIO-X] Analisando ativo: ${ativo}...`);
           const historicoAtivo = historicoPorAtivo.get(ativo) || [];
           const resolvidos = historicoAtivo.filter(op => op.resultado === 'WIN' || op.resultado === 'LOSS');
           
@@ -322,11 +318,10 @@ export async function GET(request: Request) {
           let ultimaOpFoiLoss = false;
           let direcaoProibida = "NENHUMA";
 
-          // 🧠 LÓGICA DE APRENDIZAGEM E PUNIÇÃO DE LOSS
+          // Blacklist e Geladeira
           if (ultimasOps.length > 0) {
-            // 1. Blacklist de Duplo Loss (Se errar 2x seguidas, expulsa o ativo)
             if (ultimasOps.length >= 2 && ultimasOps[0].resultado === 'LOSS' && ultimasOps[1].resultado === 'LOSS') {
-              console.log(`💀 [BLACKLIST] ${ativo} deu 2 losses seguidos. Ignorando hoje.`);
+              console.log(`   💀 [BLACKLIST] ${ativo} deu 2 losses seguidos. Bloqueado.`);
               return; 
             }
 
@@ -342,20 +337,26 @@ export async function GET(request: Request) {
               const minDecorridos = (agoraUtcMs - tempoOpDB) / (1000 * 60);
 
               if (minDecorridos >= 0) { 
-                if (op === ultimasOps[0] && minDecorridos < 15) bloqueado = true; // 15 min genérico
-                if (op.resultado === 'LOSS' && minDecorridos < 60) bloqueado = true; // 60 MINUTOS de geladeira pós-loss!
+                if (op === ultimasOps[0] && minDecorridos < 15) bloqueado = true; // 15m delay sinal
+                if (op.resultado === 'LOSS' && minDecorridos < 60) bloqueado = true; // 60m geladeira
               }
             }
           }
 
-          if (bloqueado) return;
+          if (bloqueado) {
+            console.log(`   ⏳ Ativo ${ativo} em Geladeira ou Recém-Operado. Ignorado.`);
+            return;
+          }
 
           const [res5m, res15m] = await Promise.all([
             fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=5m&range=1d`, { cache: 'no-store' }),
             fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=15m&range=2d`, { cache: 'no-store' })
           ]);
 
-          if (!res5m.ok || !res15m.ok) return;
+          if (!res5m.ok || !res15m.ok) {
+            console.log(`   ❌ Erro ao buscar dados do Yahoo para ${ativo}.`);
+            return;
+          }
           const json5m = await res5m.json(); const json15m = await res15m.json();
           
           const quote5m = json5m.chart?.result?.[0]?.indicators?.quote?.[0];
@@ -368,7 +369,10 @@ export async function GET(request: Request) {
 
           const rsi5m = calcularRSI(velas5m);
 
-          if (rsi5m > 35 && rsi5m < 65) return;
+          if (rsi5m > 35 && rsi5m < 65) {
+            console.log(`   ↳ 🟡 RSI Neutro (${rsi5m.toFixed(2)}). Sem força extrema para entrada.`);
+            return;
+          }
 
           const ema20_M15 = calcularEMA(velas15m, 20);
           const padraoMicro = identificarPadraoCandle(velas5m);
@@ -380,22 +384,22 @@ export async function GET(request: Request) {
             else if (velas15m[velas15m.length - 1].fechamento < ema20_M15) tendenciaMacro = "BAIXA";
           }
 
-          // 🧠 INJEÇÃO DE CONTEXTO NA IA (O ROBÔ SABE O QUE FEZ)
+          console.log(`   ↳ 📊 Dados pré-IA: RSI ${rsi5m.toFixed(2)} | MACRO: ${tendenciaMacro} | Padrão: ${padraoMicro}`);
+
           let avisoMemoriaIA = "";
           if (ultimaOpFoiLoss) {
-            avisoMemoriaIA = `⚠️ ATENÇÃO: Nossa última operação neste ativo foi LOSS em ${direcaoProibida}. O mercado pode estar em forte tendência direcional. SÓ AUTORIZE uma nova ${direcaoProibida} se o mercado formou um novo cenário com RSI extremo (< 25 ou > 75).`;
+            avisoMemoriaIA = `⚠️ Nossa última operação aqui foi LOSS em ${direcaoProibida}. Exija padrões fortíssimos se a intenção for operar ${direcaoProibida} de novo.`;
           }
 
-          const prompt = `Você é um Analista Quant EXTREMAMENTE RIGOROSO operando ${ativo}.
-🧠 DADOS: Placar: ${taxaAcertoAtual}% | T. Macro: ${tendenciaMacro} | RSI: ${rsi5m.toFixed(2)} | Padrão: ${padraoMicro}
+          const prompt = `Você é um Analista Quant operando ${ativo}.
+🧠 DADOS: Placar Ativo: ${taxaAcertoAtual}% | T. Macro: ${tendenciaMacro} | RSI: ${rsi5m.toFixed(2)} | Padrão M5: ${padraoMicro}
 ${avisoMemoriaIA}
 
-REGRAS OBRIGATÓRIAS DE REJEIÇÃO:
-1. Só autorize COMPRA se o RSI estiver próximo a 30 (Sobrevenda) E a tendência for de ALTA.
-2. Só autorize VENDA se o RSI estiver próximo a 70 (Sobrecompra) E a tendência for de BAIXA.
-3. Se a direção do sinal for a mesma da proibida, SEJA IMPLACÁVEL NA EXIGÊNCIA DO SINAL.
-4. Na menor divergência entre os dados ou falta de clareza, retorne NEUTRO.
-Retorne JSON EXATO: {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%", "motivo": "Até 15 palavras."}`;
+REGRAS:
+1. Autorize COMPRA apenas se o mercado demonstrar exaustão de baixa (RSI < 35) e padrão de reversão/rejeição.
+2. Autorize VENDA apenas se o mercado demonstrar limite de alta (RSI > 65) e padrão de reversão/rejeição.
+3. Se a direção do sinal for CONTRA a Tendência Macro, exija um padrão de reversão (Engolfo, Martelo) MUITO forte, caso contrário retorne NEUTRO.
+Seja objetivo. Retorne JSON: {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%", "motivo": "Até 15 palavras."}`;
 
           let iaResposta = null;
           let tentativas = 0;
@@ -419,8 +423,13 @@ Retorne JSON EXATO: {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao":
             }
           }
 
-          if (!iaResposta) return; 
+          if (!iaResposta) {
+            console.log(`   ↳ 🤖 Falha de comunicação com a IA.`);
+            return; 
+          }
           const confiancaNumerica = parseInt(iaResposta.confianca_padrao);
+
+          console.log(`   ↳ 🤖 Veredito IA: [${iaResposta.sinal}] (${iaResposta.confianca_padrao}) - ${iaResposta.motivo}`);
 
           if ((iaResposta.sinal === 'COMPRA' || iaResposta.sinal === 'VENDA') && confiancaNumerica >= 70) {
             torneioDeSinais.push({ 
@@ -433,17 +442,18 @@ Retorne JSON EXATO: {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao":
     }
 
     const tempoGasto = ((Date.now() - inicioExecucao) / 1000).toFixed(2);
-    console.log(`⏱️ Tempo total de varredura: ${tempoGasto}s`);
+    console.log(`\n⏱️ Tempo total de varredura: ${tempoGasto}s`);
     
     if (torneioDeSinais.length > 0) {
       torneioDeSinais.sort((a, b) => b.confianca - a.confianca);
       const alvo = torneioDeSinais[0];
+      console.log(`🚀 ATIRANDO! Enviando SINAL de ${alvo.ia.sinal} para ${alvo.ativo}`);
       await enviarSinalTelegram(alvo.ativo, alvo.ia, alvo.precoAtual, alvo.rsi, alvo.padrao, alvo.stats);
     } else {
-      console.log(`🛑 Nenhum sinal atendeu aos critérios de rigor da IA.`);
+      console.log(`🛑 Nenhum sinal atingiu a confiança e rigidez exigida pela IA neste ciclo.`);
     }
 
-    return NextResponse.json({ success: true, mensagem: `Concluído.` });
+    return NextResponse.json({ success: true, mensagem: `Concluído com Raio-X.` });
   } catch (error: any) {
     return NextResponse.json({ error: "Erro interno" }, { status: 500 });
   }
