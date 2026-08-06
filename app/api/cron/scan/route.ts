@@ -20,10 +20,10 @@ const getSupabaseClient = () => {
 const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
 
 // ============================================================================
-// BLINDAGEM DE HORÁRIOS DOS MERCADOS (ATUALIZADA)
+// BLINDAGEM DE HORÁRIOS DOS MERCADOS 
 // ============================================================================
 function isMercadoAberto(ticker: string, dataHora: Date) {
-  const dia = dataHora.getDay(); // 0 = Dom, 1 = Seg, ..., 5 = Sex, 6 = Sáb
+  const dia = dataHora.getDay(); 
   const hora = dataHora.getHours();
   const minuto = dataHora.getMinutes();
   const tempoDecimal = hora + (minuto / 60);
@@ -31,40 +31,26 @@ function isMercadoAberto(ticker: string, dataHora: Date) {
   const isFimDeSemana = (dia === 0 || dia === 6);
   const tickerUpper = ticker.toUpperCase();
 
-  // 1. IDENTIFICADOR INTELIGENTE DE FOREX (Evita confundir AUD-USD com Cripto)
-  // Lista das principais moedas de países (Moedas Fiat)
   const moedasFiat = ['EUR', 'GBP', 'AUD', 'NZD', 'CAD', 'CHF', 'JPY', 'USD'];
   const comecaComFiat = moedasFiat.some(moeda => tickerUpper.startsWith(moeda));
-  
-  // É Forex se terminar em =X ou se terminar em -USD mas for moeda de país (ex: AUD-USD)
   const isForex = tickerUpper.endsWith('=X') || (tickerUpper.endsWith('USD') && comecaComFiat);
 
   if (isForex) {
-    // Fim de semana Forex (Fecha Sexta 18:00, Abre Domingo 18:00 BRT)
     if (dia === 5 && tempoDecimal >= 18) return false; 
     if (dia === 6) return false; 
     if (dia === 0 && tempoDecimal < 18) return false; 
-
-    // ZONA MORTA DIÁRIA (Rollover do mercado entre 18h e 19h BRT)
     if (tempoDecimal >= 18 && tempoDecimal < 19) return false;
-
     return true;
   }
 
-  // 2. CRIPTOMOEDAS REAIS (BTC, ETH, etc) - Abertas 24/7
-  // Só entra aqui se terminar em -USD e NÃO for moeda Fiat
-  if (tickerUpper.endsWith('-USD')) {
-    return true; 
-  }
+  if (tickerUpper.endsWith('-USD')) return true; 
 
-  // 3. AÇÕES BRASILEIRAS (.SA) -> Abertas das 10:00 às 17:30 BRT
   if (tickerUpper.endsWith('.SA')) {
     if (isFimDeSemana) return false;
     if (tempoDecimal < 10 || tempoDecimal >= 17.5) return false;
     return true;
   }
 
-  // 4. Default de Segurança
   if (isFimDeSemana) return false;
   return true; 
 }
@@ -123,8 +109,6 @@ function identificarPadraoCandle(velas: any[]) {
 // MÓDULO: AUDITORIA AUTOMÁTICA DE RESULTADOS (WIN / LOSS)
 // ============================================================================
 async function verificarResultadosPendentes(supabase: any) {
-  console.log("🔍 [AUDITORIA] Buscando operações pendentes no banco de dados...");
-  
   const tempoLimite = new Date(Date.now() - 6 * 60 * 1000).toISOString();
   
   const { data: pendentes } = await supabase
@@ -133,12 +117,8 @@ async function verificarResultadosPendentes(supabase: any) {
     .eq('resultado', 'PENDENTE')
     .lt('created_at', tempoLimite);
 
-  if (!pendentes || pendentes.length === 0) {
-    console.log("✔️ [AUDITORIA] Nenhuma operação pendente aguardando conferência.");
-    return;
-  }
+  if (!pendentes || pendentes.length === 0) return;
 
-  console.log(`⏱️ [AUDITORIA] Encontradas ${pendentes.length} operações para conferir!`);
   const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
   const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
 
@@ -160,8 +140,6 @@ async function verificarResultadosPendentes(supabase: any) {
 
       await supabase.from('historico_operacoes').update({ resultado: resultadoFinal }).eq('id', op.id);
       
-      console.log(`🎯 [AUDITORIA] ${op.ticker} finalizado! Sinal: ${op.sinal} | Resultado: ${resultadoFinal}`);
-
       const icone = resultadoFinal === 'WIN' ? '✅ WIN TÁ NO BOLSO!' : (resultadoFinal === 'LOSS' ? '❌ LOSS' : '⚪ EMPATE');
       const ativoFormatado = op.ticker.endsWith('=X') ? op.ticker.substring(0, 3) + '/' + op.ticker.substring(3, 6) : op.ticker.replace('-', '/');
       
@@ -173,9 +151,7 @@ async function verificarResultadosPendentes(supabase: any) {
       });
 
       await delay(500); 
-    } catch (e: any) {
-      console.error(`❌ [AUDITORIA] Erro ao verificar operação ${op.id}:`, e.message);
-    }
+    } catch (e: any) { }
   }
 }
 
@@ -210,68 +186,48 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
 
     const mensagem = `🤖 *SINAL IA - INTELIGÊNCIA AGRESSIVA* 🤖\n*Ativo:* ${ativoFormatado}\n*Ação:* ${iaData.sinal === 'COMPRA' ? '🟢 COMPRA' : '🔴 VENDA'}\n⏰ *Entrada:* ${formatadorHora.format(proximaVela)}\n⏳ *Expiração:* ${formatadorHora.format(expiracao)}\n💲 *Preço Atual:* ${precoAtual.toFixed(4)}\n\n${iconeDesempenho} *Histórico do Ativo:*\n*Acertos:* ${stats.taxaAcerto}% (${stats.wins}W / ${stats.losses}L)\n\n🌐 *PLACAR DO DIA (BOT):*\n*Status:* ${stats.statusBot}\n*Acertos Hoje:* ${stats.taxaAcertoDiaria}% 🎯\n*Total:* ${stats.globalWins} WINS ✅ / ${stats.globalLosses} LOSSES ❌\n\n📊 *Gatilho Identificado:* ${padrao.replace(/_/g, ' ')}\n🔥 *RSI (Força):* ${rsi.toFixed(2)}\n🧠 *Mapeamento IA:* ${iaData.motivo}\n🎯 *Confiança:* ${iaData.confianca_padrao}\n\n_O robô verificará o resultado desta operação automaticamente em 6 minutos._ ⏳`;
     
-    const payload: any = { 
-      chat_id: TELEGRAM_CHAT_ID, 
-      text: mensagem, 
-      parse_mode: 'Markdown' 
-    };
+    const payload: any = { chat_id: TELEGRAM_CHAT_ID, text: mensagem, parse_mode: 'Markdown' };
     
     await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-
-    console.log(`✅ [TELEGRAM] Sinal enviado com sucesso para ${ativo}!`);
-  } catch (error: any) {
-    console.error(`❌ [TELEGRAM ERRO CRÍTICO]:`, error.message);
-  }
+  } catch (error: any) { }
 }
 
 // ============================================================================
-// NÚCLEO DO ROBÔ (EXECUÇÃO OTIMIZADA PARALELA PARA 45+ ATIVOS)
+// NÚCLEO DO ROBÔ (MEMÓRIA DE ERROS E EXCLUSÃO DE ATIVOS)
 // ============================================================================
 export async function GET(request: Request) {
   const inicioExecucao = Date.now();
   console.log("==========================================");
-  console.log("🤖 INICIANDO CICLO DO ROBÔ (MODO ULTRARRÁPIDO)...");
-  console.log("==========================================");
+  console.log("🤖 INICIANDO CICLO COM MEMÓRIA DE LOSS...");
 
   try {
     const CRON_SECRET = process.env.CRON_SECRET || '17a85b09'; 
     const GROQ_BOT_KEY = process.env.GROQ_BOT_KEY || ''; 
     const { searchParams } = new URL(request.url);
     if (searchParams.get('key') !== CRON_SECRET) {
-      console.log("❌ Acesso negado. Chave incorreta.");
       return NextResponse.json({ error: 'Não autorizado' }, { status: 401 });
     }
 
     const supabase = getSupabaseClient();
-
-    // 1️⃣ AUDITORIA AUTOMÁTICA
     await verificarResultadosPendentes(supabase);
 
-    // 2️⃣ OBTÉM LISTA DE ATIVOS
     const { data: ativosDB } = await supabase.from('ativos_global').select('ticker').eq('status', 'ativo');
-    if (!ativosDB) {
-      return NextResponse.json({ error: "Erro DB" }, { status: 500 });
-    }
+    if (!ativosDB) return NextResponse.json({ error: "Erro DB" }, { status: 500 });
     
     let ativosBrutos = ativosDB.map(a => a.ticker).filter(a => !a.toUpperCase().includes('OTC'));
     const horaSP = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
     
-    // Lista de ativos filtrada pela nova função corretíssima de horário comercial
     let ativosAtivos = ativosBrutos.filter(ativo => isMercadoAberto(ativo, horaSP));
 
-    console.log(`📋 Total de ativos abertos no momento: ${ativosAtivos.length}`);
-
-    // 3️⃣ CARREGAMENTO EM LOTE DO BANCO (Evita centenas de queries soltas)
     const { data: todasOperacoes } = await supabase
       .from('historico_operacoes')
-      .select('ticker, resultado, created_at')
+      .select('ticker, resultado, sinal, created_at')
       .in('ticker', ativosAtivos)
       .order('created_at', { ascending: false });
 
-    // Mapeia histórico na memória para acesso ultrarrápido O(1)
     const historicoPorAtivo = new Map<string, any[]>();
     if (todasOperacoes) {
       for (const op of todasOperacoes) {
@@ -283,7 +239,6 @@ export async function GET(request: Request) {
     const torneioDeSinais: any[] = [];
     const agoraUtcMs = new Date().getTime(); 
 
-    // Placar Geral do Dia
     const hojeBR = new Date().toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo" });
     const opsDeHoje = (todasOperacoes || []).filter(op => {
       if (op.resultado !== 'WIN' && op.resultado !== 'LOSS') return false;
@@ -298,15 +253,10 @@ export async function GET(request: Request) {
     const taxaAcertoDiaria = totalOpsDiaria > 0 ? Math.round((globalWins / totalOpsDiaria) * 100) : 0;
     const statusBot = saldoDiario > 0 ? "🟢 POSITIVO" : (saldoDiario < 0 ? "🔴 NEGATIVO" : "⚪ ZERO");
 
-    // 4️⃣ PROCESSAMENTO PARALELO EM LOTES (BATCHES DE 6 EM 6)
     const TAMANHO_LOTE = 6;
     
     for (let i = 0; i < ativosAtivos.length; i += TAMANHO_LOTE) {
-      // TRAVA DE SEGURANÇA: Se a execução atingir 48 segundos, para a varredura
-      if (Date.now() - inicioExecucao > 48000) {
-        console.log(`⏱️ [TRAVA DE SEGURANÇA] Interrompendo varredura em 48s para evitar Timeout. Analisados: ${i}/${ativosAtivos.length}`);
-        break;
-      }
+      if (Date.now() - inicioExecucao > 48000) break;
 
       const loteAtual = ativosAtivos.slice(i, i + TAMANHO_LOTE);
 
@@ -320,37 +270,39 @@ export async function GET(request: Request) {
           const totalResolvido = wins + losses;
           const taxaAcertoAtual = totalResolvido > 0 ? Math.round((wins / totalResolvido) * 100) : 0;
 
-          // 🛡️ FILTRO 1: BLOQUEIO POR HISTÓRICO RUIM
-          if (totalResolvido >= 4 && taxaAcertoAtual < 55) {
-            console.log(`🩸 [BLOQUEIO] ${ativo} com acerto de ${taxaAcertoAtual}%. Ignorando.`);
-            return;
-          }
-
-          // Verificação de Cooldown de tempo pós-loss/operação recente
           const ultimasOps = historicoAtivo.slice(0, 5);
           let bloqueado = false;
+          let ultimaOpFoiLoss = false;
+          let direcaoProibida = "NENHUMA";
 
+          // 🧠 LÓGICA DE APRENDIZAGEM E PUNIÇÃO DE LOSS
           if (ultimasOps.length > 0) {
+            // 1. Blacklist de Duplo Loss (Se errar 2x seguidas, expulsa o ativo)
+            if (ultimasOps.length >= 2 && ultimasOps[0].resultado === 'LOSS' && ultimasOps[1].resultado === 'LOSS') {
+              console.log(`💀 [BLACKLIST] ${ativo} deu 2 losses seguidos. Ignorando hoje.`);
+              return; 
+            }
+
+            if (ultimasOps[0].resultado === 'LOSS') {
+              ultimaOpFoiLoss = true;
+              direcaoProibida = ultimasOps[0].sinal;
+            }
+
             for (const op of ultimasOps) {
               let dataStr = op.created_at;
               if (!dataStr.includes('Z') && !dataStr.includes('+')) dataStr += 'Z';
-              
               const tempoOpDB = new Date(dataStr).getTime();
               const minDecorridos = (agoraUtcMs - tempoOpDB) / (1000 * 60);
 
               if (minDecorridos >= 0) { 
-                if (op === ultimasOps[0] && minDecorridos < 10) bloqueado = true;
-                if (op.resultado === 'LOSS' && minDecorridos < 25) bloqueado = true;
+                if (op === ultimasOps[0] && minDecorridos < 15) bloqueado = true; // 15 min genérico
+                if (op.resultado === 'LOSS' && minDecorridos < 60) bloqueado = true; // 60 MINUTOS de geladeira pós-loss!
               }
             }
           }
 
-          if (bloqueado) {
-            console.log(`⏳ [${ativo}] Pulando: Bloqueio de tempo de segurança.`);
-            return;
-          }
+          if (bloqueado) return;
 
-          // Busca candles de 5m e 15m do Yahoo Finance
           const [res5m, res15m] = await Promise.all([
             fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=5m&range=1d`, { cache: 'no-store' }),
             fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=15m&range=2d`, { cache: 'no-store' })
@@ -369,11 +321,7 @@ export async function GET(request: Request) {
 
           const rsi5m = calcularRSI(velas5m);
 
-          // 🛡️ FILTRO 2: DESCARTE RÁPIDO DE ZONA MORTA
-          if (rsi5m > 35 && rsi5m < 65) {
-            console.log(`🛡️ [RSI NEUTRO] ${ativo} ignorado. RSI atual: ${rsi5m.toFixed(2)}`);
-            return;
-          }
+          if (rsi5m > 35 && rsi5m < 65) return;
 
           const ema20_M15 = calcularEMA(velas15m, 20);
           const padraoMicro = identificarPadraoCandle(velas5m);
@@ -385,14 +333,21 @@ export async function GET(request: Request) {
             else if (velas15m[velas15m.length - 1].fechamento < ema20_M15) tendenciaMacro = "BAIXA";
           }
 
-          // 🛡️ FILTRO 3: PROMPT MATEMÁTICO GROQ IA
+          // 🧠 INJEÇÃO DE CONTEXTO NA IA (O ROBÔ SABE O QUE FEZ)
+          let avisoMemoriaIA = "";
+          if (ultimaOpFoiLoss) {
+            avisoMemoriaIA = `⚠️ ATENÇÃO: Nossa última operação neste ativo foi LOSS em ${direcaoProibida}. O mercado pode estar em forte tendência direcional. SÓ AUTORIZE uma nova ${direcaoProibida} se o mercado formou um novo cenário com RSI extremo (< 25 ou > 75).`;
+          }
+
           const prompt = `Você é um Analista Quant EXTREMAMENTE RIGOROSO operando ${ativo}.
 🧠 DADOS: Placar: ${taxaAcertoAtual}% | T. Macro: ${tendenciaMacro} | RSI: ${rsi5m.toFixed(2)} | Padrão: ${padraoMicro}
+${avisoMemoriaIA}
 
 REGRAS OBRIGATÓRIAS DE REJEIÇÃO:
 1. Só autorize COMPRA se o RSI estiver próximo a 30 (Sobrevenda) E a tendência for de ALTA.
 2. Só autorize VENDA se o RSI estiver próximo a 70 (Sobrecompra) E a tendência for de BAIXA.
-3. Na menor divergência entre os dados ou falta de clareza, retorne NEUTRO.
+3. Se a direção do sinal for a mesma da proibida, SEJA IMPLACÁVEL NA EXIGÊNCIA DO SINAL.
+4. Na menor divergência entre os dados ou falta de clareza, retorne NEUTRO.
 Retorne JSON EXATO: {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%", "motivo": "Até 15 palavras."}`;
 
           let iaResposta = null;
@@ -426,44 +381,23 @@ Retorne JSON EXATO: {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao":
               stats: { totalOps: totalResolvido, taxaAcerto: taxaAcertoAtual, wins, losses, globalWins, globalLosses, statusBot, taxaAcertoDiaria } 
             });
           }
-        } catch (e: any) { 
-          return; 
-        }
+        } catch (e: any) { return; }
       }));
     }
 
     const tempoGasto = ((Date.now() - inicioExecucao) / 1000).toFixed(2);
     console.log(`⏱️ Tempo total de varredura: ${tempoGasto}s`);
-    console.log("==========================================");
-
+    
     if (torneioDeSinais.length > 0) {
       torneioDeSinais.sort((a, b) => b.confianca - a.confianca);
       const alvo = torneioDeSinais[0];
       await enviarSinalTelegram(alvo.ativo, alvo.ia, alvo.precoAtual, alvo.rsi, alvo.padrao, alvo.stats);
     } else {
-      console.log(`🛑 Nenhum sinal de alta probabilidade (70%+) nesta rodada. Mercado preservado.`);
-    }
-    console.log("==========================================\n");
-
-    if (horaSP.getHours() === 23 && horaSP.getMinutes() >= 50) {
-      const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
-      const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
-      
-      const msgRelatorio = `📊 *FECHAMENTO DIÁRIO DO BOT* 📊\n*Status:* ${statusBot}\n*Placar:* ${globalWins} WINS ✅ | ${globalLosses} LOSSES ❌\n*Taxa Acerto:* ${taxaAcertoDiaria}% 🎯\n\n_Sistema 100% Automático!_ 🚀`;
-      
-      await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text: msgRelatorio, parse_mode: 'Markdown' })
-      });
+      console.log(`🛑 Nenhum sinal atendeu aos critérios de rigor da IA.`);
     }
 
-    return NextResponse.json({ 
-      success: true, 
-      tempo_segundos: tempoGasto,
-      mensagem: `Varredura de ${ativosAtivos.length} ativos concluída com sucesso.` 
-    });
+    return NextResponse.json({ success: true, mensagem: `Concluído.` });
   } catch (error: any) {
-    console.error("❌ ERRO FATAL:", error);
     return NextResponse.json({ error: "Erro interno" }, { status: 500 });
   }
 }
