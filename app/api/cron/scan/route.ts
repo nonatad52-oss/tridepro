@@ -71,9 +71,6 @@ function mapearAnatomiaVelas(quote: any, quantidade: number) {
   return blocoVelas.slice(-quantidade);
 }
 
-// ============================================================================
-// MATEMÁTICA AVANÇADA (A MESCLAGEM DE TUDO QUE FUNCIONA)
-// ============================================================================
 function calcularRSI(velas: any[]) {
   if (velas.length < 15) return 50;
   const amostra = velas.slice(-14);
@@ -95,31 +92,6 @@ function calcularEMA(velas: any[], periodo: number) {
   return ema;
 }
 
-function calcularBollingerBands(velas: any[], periodo: number = 20) {
-  if (velas.length < periodo) return null;
-  const amostra = velas.slice(-periodo);
-  const soma = amostra.reduce((acc, v) => acc + v.fechamento, 0);
-  const media = soma / periodo;
-  
-  const somaDiferencas = amostra.reduce((acc, v) => acc + Math.pow(v.fechamento - media, 2), 0);
-  const desvioPadrao = Math.sqrt(somaDiferencas / periodo);
-  
-  return {
-    superior: media + (desvioPadrao * 2),
-    inferior: media - (desvioPadrao * 2),
-    media: media
-  };
-}
-
-function calcularMACD(velas: any[]) {
-  if (velas.length < 26) return { macd: 0, signal: 0, hist: 0 };
-  const ema12 = calcularEMA(velas.slice(-12), 12) || 0;
-  const ema26 = calcularEMA(velas.slice(-26), 26) || 0;
-  const macdLine = ema12 - ema26;
-  // Simplificação matemática do signal (necessita array histórico, aproximando para contexto)
-  return { macd: macdLine, cruzamento: macdLine > 0 ? "ALTA" : "BAIXA" }; 
-}
-
 function identificarPadraoCandle(velas: any[]) {
   if (velas.length < 2) return "NENHUM";
   const atual = velas[velas.length - 1]; const anterior = velas[velas.length - 2];
@@ -130,15 +102,22 @@ function identificarPadraoCandle(velas: any[]) {
   if (anterior.direcao === "ALTA" && atual.direcao === "BAIXA" && atual.fechamento < anterior.abertura) return "ENGOLFO_DE_BAIXA";
   if (atual.pavio_inf > corpoAtual * 1.5 && atual.pavio_sup <= corpoAtual * 0.8) return "MARTELO_REJEICAO_BAIXA";
   if (atual.pavio_sup > corpoAtual * 1.5 && atual.pavio_inf <= corpoAtual * 0.8) return "ESTRELA_CADENTE_REJEICAO_ALTA";
-  return "VELA_COMUM";
+  return "VELA_DE_FORCA_NORMAL";
 }
 
 // ============================================================================
-// MÓDULO: AUDITORIA AUTOMÁTICA DE RESULTADOS 
+// MÓDULO: AUDITORIA AUTOMÁTICA DE RESULTADOS (M5 EXATO)
 // ============================================================================
 async function verificarResultadosPendentes(supabase: any) {
-  const { data: pendentes } = await supabase.from('historico_operacoes').select('*').eq('resultado', 'PENDENTE');
+  const inicioAuditoria = Date.now();
+  const { data: pendentes } = await supabase
+    .from('historico_operacoes')
+    .select('*')
+    .eq('resultado', 'PENDENTE');
+
   if (!pendentes || pendentes.length === 0) return;
+
+  console.log(`🔎 [AUDITORIA] Verificando ${pendentes.length} operações pendentes...`);
 
   const agora = Date.now();
   const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
@@ -152,11 +131,14 @@ async function verificarResultadosPendentes(supabase: any) {
       
       const dataEntrada = new Date(dataSinal);
       dataEntrada.setMinutes(minutosSinal + minutosRestantes);
-      dataEntrada.setSeconds(0); dataEntrada.setMilliseconds(0);
+      dataEntrada.setSeconds(0);
+      dataEntrada.setMilliseconds(0);
 
-      const tempoExpiracao = dataEntrada.getTime() + (5 * 60 * 1000); 
+      const tempoExpiracao = dataEntrada.getTime() + (5 * 60 * 1000);
 
-      if (agora < tempoExpiracao + 60000) continue; 
+      if (agora < tempoExpiracao + 60000) {
+        continue; 
+      }
 
       const res = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${op.ticker}?interval=5m&range=1d`, { cache: 'no-store' });
       if (!res.ok) continue;
@@ -171,15 +153,22 @@ async function verificarResultadosPendentes(supabase: any) {
       let targetIndex = -1;
 
       for (let i = timestampArray.length - 1; i >= 0; i--) {
-        if (Math.abs(timestampArray[i] - targetTimestamp) <= 120) { targetIndex = i; break; }
+        if (Math.abs(timestampArray[i] - targetTimestamp) <= 120) {
+          targetIndex = i;
+          break;
+        }
       }
 
       if (targetIndex === -1) {
-        if (agora > tempoExpiracao + (120 * 60 * 1000)) await supabase.from('historico_operacoes').update({ resultado: 'CANCELADO' }).eq('id', op.id);
+        if (agora > tempoExpiracao + (120 * 60 * 1000)) {
+          await supabase.from('historico_operacoes').update({ resultado: 'CANCELADO' }).eq('id', op.id);
+        }
         continue;
       }
 
-      const precoAbertura = quote.open[targetIndex]; const precoFechamento = quote.close[targetIndex];
+      const precoAbertura = quote.open[targetIndex];
+      const precoFechamento = quote.close[targetIndex];
+
       if (precoAbertura == null || precoFechamento == null) continue;
 
       let resultadoFinal = 'LOSS';
@@ -189,25 +178,30 @@ async function verificarResultadosPendentes(supabase: any) {
 
       await supabase.from('historico_operacoes').update({ resultado: resultadoFinal }).eq('id', op.id);
       
-      let casasDecimais = precoAbertura < 10 ? 5 : 3; 
+      let casasDecimais = 2;
+      if (precoAbertura < 10) casasDecimais = 5; 
+      else if (precoAbertura < 1000) casasDecimais = 3; 
+
       const icone = resultadoFinal === 'WIN' ? '✅ WIN TÁ NO BOLSO!' : (resultadoFinal === 'LOSS' ? '❌ LOSS' : '⚪ EMPATE');
       const ativoFormatado = op.ticker.endsWith('=X') ? op.ticker.substring(0, 3) + '/' + op.ticker.substring(3, 6) : op.ticker.replace('-', '/');
       
-      const msg = `🧾 *RESULTADO* 🧾\n*Ativo:* ${ativoFormatado}\n*Direção:* ${op.sinal === 'COMPRA' ? '🟢' : '🔴'} ${op.sinal}\n\n*Veredito:* ${icone}\n💸 Abertura: ${precoAbertura.toFixed(casasDecimais)}\n🛑 Fechamento: ${precoFechamento.toFixed(casasDecimais)}`;
+      const msg = `🧾 *RESULTADO DA OPERAÇÃO* 🧾\n*Ativo:* ${ativoFormatado}\n*Direção:* ${op.sinal === 'COMPRA' ? '🟢 COMPRA' : '🔴 VENDA'}\n\n*Veredito:* ${icone}\n\n💸 *Abertura (Vela M5):* ${precoAbertura.toFixed(casasDecimais)}\n🛑 *Fechamento (Vela M5):* ${precoFechamento.toFixed(casasDecimais)}`;
 
       await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text: msg, parse_mode: 'Markdown' })
       });
-      await delay(500); 
+
+      await delay(300); 
     } catch (e: any) { }
   }
+  console.log(`⏱️ [AUDITORIA] Concluída em ${((Date.now() - inicioAuditoria)/1000).toFixed(2)}s`);
 }
 
 // ============================================================================
-// ENVIO DE SINAL NOVO MODELO
+// FUNÇÃO DE ENVIO DE SINAL 
 // ============================================================================
-async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: number, analise: any, stats: any) {
+async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: number, rsi: number, padrao: string, stats: any) {
   try {
     const supabase = getSupabaseClient();
     const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
@@ -222,45 +216,44 @@ async function enviarSinalTelegram(ativo: string, iaData: any, precoAtual: numbe
     const expiracao = new Date(proximaVela); expiracao.setMinutes(expiracao.getMinutes() + 5);
 
     await supabase.from('historico_operacoes').insert([{ 
-      ticker: ativo, sinal: iaData.sinal, taxa_entrada: precoAtual, resultado: 'PENDENTE', created_at: new Date().toISOString()
+      ticker: ativo, 
+      sinal: iaData.sinal, 
+      taxa_entrada: precoAtual, 
+      resultado: 'PENDENTE',
+      created_at: new Date().toISOString()
     }]);
 
-    const mensagem = `🤖 *SINAL IA - MODO CONFLUÊNCIA* 🤖
-*Ativo:* ${ativoFormatado}
-*Ação:* ${iaData.sinal === 'COMPRA' ? '🟢 COMPRA' : '🔴 VENDA'}
-⏰ *Entrada:* ${formatadorHora.format(proximaVela)}
-⏳ *Expiração:* ${formatadorHora.format(expiracao)}
+    let iconeDesempenho = "📊";
+    if (stats.taxaAcerto >= 65) iconeDesempenho = "🏆";
+    else if (stats.taxaAcerto <= 45 && stats.totalOps > 0) iconeDesempenho = "⚠️";
 
-📊 *CONFLUÊNCIAS DETECTADAS:*
-• RSI (Força): ${analise.rsi.toFixed(2)}
-• Bollinger: ${analise.posicaoBollinger}
-• MACD: ${analise.macdDirection}
-• Padrão Vela: ${analise.padrao.replace(/_/g, ' ')}
-
-🧠 *IA:* ${iaData.motivo} (Confiança: ${iaData.confianca_padrao})
-
-🌐 *PLACAR DO DIA:* ${stats.statusBot} | Acertos Hoje: ${stats.taxaAcertoDiaria}% 🎯`;
+    const mensagem = `🤖 *SINAL IA - INTELIGÊNCIA AGRESSIVA* 🤖\n*Ativo:* ${ativoFormatado}\n*Ação:* ${iaData.sinal === 'COMPRA' ? '🟢 COMPRA' : '🔴 VENDA'}\n⏰ *Entrada:* ${formatadorHora.format(proximaVela)}\n⏳ *Expiração:* ${formatadorHora.format(expiracao)}\n💲 *Preço Atual:* ${precoAtual.toFixed(4)}\n\n${iconeDesempenho} *Histórico do Ativo:*\n*Acertos:* ${stats.taxaAcerto}% (${stats.wins}W / ${stats.losses}L)\n\n🌐 *PLACAR DO DIA (BOT):*\n*Status:* ${stats.statusBot}\n*Acertos Hoje:* ${stats.taxaAcertoDiaria}% 🎯\n*Total:* ${stats.globalWins} WINS ✅ / ${stats.globalLosses} LOSSES ❌\n\n📊 *Gatilho Identificado:* ${padrao.replace(/_/g, ' ')}\n🔥 *RSI (Força):* ${rsi.toFixed(2)}\n🧠 *Mapeamento IA:* ${iaData.motivo}\n🎯 *Confiança:* ${iaData.confianca_padrao}\n\n_O robô verificará o resultado desta operação após o fechamento da vela M5._ ⏳`;
+    
+    const payload: any = { chat_id: TELEGRAM_CHAT_ID, text: mensagem, parse_mode: 'Markdown' };
     
     await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text: mensagem, parse_mode: 'Markdown' }),
+      body: JSON.stringify(payload),
     });
+    console.log(`🚀 [SINAL ENVIADO] ${ativoFormatado} - Direction: ${iaData.sinal}`);
   } catch (error: any) { }
 }
 
 // ============================================================================
-// NÚCLEO DO ROBÔ: PROCESSAMENTO CONTROLADO
+// NÚCLEO DO ROBÔ (EXECUÇÃO E ANÁLISE POR BLOCOS)
 // ============================================================================
 export async function GET(request: Request) {
   const inicioExecucao = Date.now();
-  console.log("==========================================");
-  console.log("🤖 INICIANDO MODO QUANT-HÍBRIDO (ANTI-TRAVAMENTO)...");
+  console.log("==================================================");
+  console.log("🤖 [INÍCIO DE CICLO] Varredura com Análise por Blocos...");
 
   try {
     const CRON_SECRET = process.env.CRON_SECRET || '17a85b09'; 
     const GROQ_BOT_KEY = process.env.GROQ_BOT_KEY || ''; 
     const { searchParams } = new URL(request.url);
-    if (searchParams.get('key') !== CRON_SECRET) return NextResponse.json({ error: 'Não autorizado' }, { status: 401 });
+    if (searchParams.get('key') !== CRON_SECRET) {
+      return NextResponse.json({ error: 'Não autorizado' }, { status: 401 });
+    }
 
     const supabase = getSupabaseClient();
     await verificarResultadosPendentes(supabase);
@@ -268,37 +261,104 @@ export async function GET(request: Request) {
     const { data: ativosDB } = await supabase.from('ativos_global').select('ticker').eq('status', 'ativo');
     if (!ativosDB) return NextResponse.json({ error: "Erro DB" }, { status: 500 });
     
+    let ativosBrutos = ativosDB.map(a => a.ticker).filter(a => !a.toUpperCase().includes('OTC'));
     const horaSP = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
-    let ativosAtivos = ativosDB.map(a => a.ticker).filter(a => !a.toUpperCase().includes('OTC') && isMercadoAberto(a, horaSP));
     
-    // 🔥 A MÁGICA PARA NÃO TRAVAR A VERCEL NEM A IA 🔥
-    // Mistura os ativos e pega no máximo 12 para analisar por minuto
-    ativosAtivos = ativosAtivos.sort(() => 0.5 - Math.random()).slice(0, 12);
-    
-    console.log(`📡 Analisando lote otimizado de ${ativosAtivos.length} ativos...`);
+    let ativosAtivos = ativosBrutos.filter(ativo => isMercadoAberto(ativo, horaSP));
 
-    const { data: opsDeHojeDB } = await supabase
+    const { data: todasOperacoes } = await supabase
       .from('historico_operacoes')
-      .select('resultado')
-      .gte('created_at', new Date(new Date().setHours(0,0,0,0)).toISOString());
-      
-    const opsDeHoje = opsDeHojeDB || [];
-    const globalWins = opsDeHoje.filter(op => op.resultado === 'WIN').length;
-    const globalLosses = opsDeHoje.filter(op => op.resultado === 'LOSS').length;
-    const totalOpsDiaria = globalWins + globalLosses;
-    const taxaAcertoDiaria = totalOpsDiaria > 0 ? Math.round((globalWins / totalOpsDiaria) * 100) : 0;
-    const statusBot = globalWins > globalLosses ? "🟢 POSITIVO" : (globalWins < globalLosses ? "🔴 NEGATIVO" : "⚪ ZERO");
+      .select('ticker, resultado, sinal, created_at')
+      .in('ticker', ativosAtivos)
+      .order('created_at', { ascending: false });
+
+    const historicoPorAtivo = new Map<string, any[]>();
+    if (todasOperacoes) {
+      for (const op of todasOperacoes) {
+        if (!historicoPorAtivo.has(op.ticker)) historicoPorAtivo.set(op.ticker, []);
+        historicoPorAtivo.get(op.ticker)!.push(op);
+      }
+    }
 
     const torneioDeSinais: any[] = [];
+    const agoraUtcMs = new Date().getTime(); 
+
+    const hojeBR = new Date().toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo" });
+    const opsDeHoje = (todasOperacoes || []).filter(op => {
+      if (op.resultado !== 'WIN' && op.resultado !== 'LOSS') return false;
+      const dataOp = new Date(op.created_at).toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo" });
+      return dataOp === hojeBR;
+    });
+
+    const globalWins = opsDeHoje.filter(op => op.resultado === 'WIN').length;
+    const globalLosses = opsDeHoje.filter(op => op.resultado === 'LOSS').length;
+    const saldoDiario = globalWins - globalLosses;
+    const totalOpsDiaria = globalWins + globalLosses;
+    const taxaAcertoDiaria = totalOpsDiaria > 0 ? Math.round((globalWins / totalOpsDiaria) * 100) : 0;
+    const statusBot = saldoDiario > 0 ? "🟢 POSITIVO" : (saldoDiario < 0 ? "🔴 NEGATIVO" : "⚪ ZERO");
+
+    // --- CONFIGURAÇÃO E DIVISÃO EM BLOCOS DE PROCESSAMENTO ---
+    const TAMANHO_BLOCO = 5; // Processa 5 ativos simultaneamente por lote
+    const totalBlocos = Math.ceil(ativosAtivos.length / TAMANHO_BLOCO);
     
-    // Analisa de 4 em 4 para não dar pico de memória
-    for (let i = 0; i < ativosAtivos.length; i += 4) {
-      if (Date.now() - inicioExecucao > 45000) break; // Trava de segurança da Vercel
-      
-      const loteAtual = ativosAtivos.slice(i, i + 4);
+    console.log(`📊 [MERCADO] Ativos abertos: ${ativosAtivos.length} | Processando em ${totalBlocos} bloco(s) de ${TAMANHO_BLOCO}`);
+
+    for (let indexBloco = 0; indexBloco < totalBlocos; indexBloco++) {
+      const inicioBloco = Date.now();
+      const tempoDecorridoGeral = inicioBloco - inicioExecucao;
+
+      // Trava de segurança Vercel Timeout (Aborta antes dos 48 segundos para finalizar graciosamente)
+      if (tempoDecorridoGeral > 48000) {
+        console.warn(`⏱️ [TIMEOUT GUARD] Interrompendo varredura no Bloco ${indexBloco + 1}/${totalBlocos}. Tempo total: ${(tempoDecorridoGeral / 1000).toFixed(1)}s`);
+        break;
+      }
+
+      const inicioFatia = indexBloco * TAMANHO_BLOCO;
+      const loteAtual = ativosAtivos.slice(inicioFatia, inicioFatia + TAMANHO_BLOCO);
+
+      console.log(`📦 [BLOCO ${indexBloco + 1}/${totalBlocos}] Iniciando análise de ${loteAtual.length} ativos: (${loteAtual.join(', ')})`);
 
       await Promise.all(loteAtual.map(async (ativo) => {
         try {
+          const historicoAtivo = historicoPorAtivo.get(ativo) || [];
+          const resolvidos = historicoAtivo.filter(op => op.resultado === 'WIN' || op.resultado === 'LOSS');
+          
+          const wins = resolvidos.filter(op => op.resultado === 'WIN').length;
+          const losses = resolvidos.filter(op => op.resultado === 'LOSS').length;
+          const totalResolvido = wins + losses;
+          const taxaAcertoAtual = totalResolvido > 0 ? Math.round((wins / totalResolvido) * 100) : 0;
+
+          const ultimasOps = historicoAtivo.slice(0, 5);
+          let bloqueado = false;
+          let ultimaOpFoiLoss = false;
+          let direcaoProibida = "NENHUMA";
+
+          if (ultimasOps.length > 0) {
+            if (ultimasOps.length >= 2 && ultimasOps[0].resultado === 'LOSS' && ultimasOps[1].resultado === 'LOSS') {
+              console.log(`💀 [BLACKLIST] ${ativo} 2x Loss. Descartado hoje.`);
+              return; 
+            }
+
+            if (ultimasOps[0].resultado === 'LOSS') {
+              ultimaOpFoiLoss = true;
+              direcaoProibida = ultimasOps[0].sinal;
+            }
+
+            for (const op of ultimasOps) {
+              let dataStr = op.created_at;
+              if (!dataStr.includes('Z') && !dataStr.includes('+')) dataStr += 'Z';
+              const tempoOpDB = new Date(dataStr).getTime();
+              const minDecorridos = (agoraUtcMs - tempoOpDB) / (1000 * 60);
+
+              if (minDecorridos >= 0) { 
+                if (op === ultimasOps[0] && minDecorridos < 15) bloqueado = true;
+                if (op.resultado === 'LOSS' && minDecorridos < 60) bloqueado = true;
+              }
+            }
+          }
+
+          if (bloqueado) return;
+
           const [res5m, res15m] = await Promise.all([
             fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=5m&range=1d`, { cache: 'no-store' }),
             fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ativo}?interval=15m&range=2d`, { cache: 'no-store' })
@@ -306,93 +366,97 @@ export async function GET(request: Request) {
 
           if (!res5m.ok || !res15m.ok) return;
           const json5m = await res5m.json(); const json15m = await res15m.json();
+          
           const quote5m = json5m.chart?.result?.[0]?.indicators?.quote?.[0];
           const quote15m = json15m.chart?.result?.[0]?.indicators?.quote?.[0];
-          
           if (!quote5m?.close || !quote15m?.close) return;
-          const velas5m = mapearAnatomiaVelas(quote5m, 30);
+
+          const velas5m = mapearAnatomiaVelas(quote5m, 20);
           const velas15m = mapearAnatomiaVelas(quote15m, 20);
-          if (velas5m.length < 26) return;
+          if (velas5m.length < 15 || velas15m.length < 20) return;
 
+          const rsi5m = calcularRSI(velas5m);
+
+          if (rsi5m > 35 && rsi5m < 65) return;
+
+          const ema20_M15 = calcularEMA(velas15m, 20);
+          const padraoMicro = identificarPadraoCandle(velas5m);
           const precoAtual = velas5m[velas5m.length - 1].fechamento;
-          const rsi = calcularRSI(velas5m);
-          const bb = calcularBollingerBands(velas5m) || { superior: 999999, inferior: 0 };
-          const macd = calcularMACD(velas5m);
-          const padrao = identificarPadraoCandle(velas5m);
-
-          // Filtro primário agressivo: Ignora imediatamente se não estiver nos extremos (Economiza requisições pra IA)
-          if (rsi > 40 && rsi < 60) {
-            console.log(`[IGNORE] ${ativo} - Mercado sem definição clara (RSI ${rsi.toFixed(2)})`);
-            return;
-          }
-
-          let posicaoBollinger = "DENTRO DAS BANDAS";
-          if (precoAtual >= bb.superior) posicaoBollinger = "ROMPENDO BANDA SUPERIOR (ALTA EXTREMA)";
-          if (precoAtual <= bb.inferior) posicaoBollinger = "ROMPENDO BANDA INFERIOR (BAIXA EXTREMA)";
 
           let tendenciaMacro = "LATERAL";
-          const ema20_M15 = calcularEMA(velas15m, 20);
           if (ema20_M15) {
             if (velas15m[velas15m.length - 1].fechamento > ema20_M15) tendenciaMacro = "ALTA";
             else if (velas15m[velas15m.length - 1].fechamento < ema20_M15) tendenciaMacro = "BAIXA";
           }
 
-          console.log(`[ANÁLISE HÍBRIDA] ${ativo} | RSI: ${rsi.toFixed(1)} | BB: ${posicaoBollinger} | MACD: ${macd.cruzamento} | Padrão: ${padrao}`);
+          let avisoMemoriaIA = "";
+          if (ultimaOpFoiLoss) {
+            avisoMemoriaIA = `⚠️ ATENÇÃO: Nossa última operação neste ativo foi LOSS em ${direcaoProibida}. O mercado pode estar em forte tendência direcional. SÓ AUTORIZE uma nova ${direcaoProibida} se o mercado formou um novo cenário com RSI extremo (< 25 ou > 75).`;
+          }
 
-          const prompt = `Você é um Algoritmo de Alta Frequência analisando Confluências Técnicas.
-Ativo: ${ativo}
-Preço: ${precoAtual}
-Tendência Macro (M15): ${tendenciaMacro}
-RSI M5: ${rsi.toFixed(2)}
-Bollinger: ${posicaoBollinger}
-Momentum MACD: ${macd.cruzamento}
-Padrão de Candle: ${padrao}
+          const prompt = `Você é um Analista Quant EXTREMAMENTE RIGOROSO operando ${ativo}.
+🧠 DADOS: Placar: ${taxaAcertoAtual}% | T. Macro: ${tendenciaMacro} | RSI: ${rsi5m.toFixed(2)} | Padrão: ${padraoMicro}
+${avisoMemoriaIA}
 
-Regra Operacional Híbrida:
-- Para COMPRAR: O ativo precisa ter batido no fundo (Bollinger Inferior ou RSI < 35) E apresentar padrão de reversão.
-- Para VENDER: O ativo precisa ter batido no teto (Bollinger Superior ou RSI > 65) E apresentar padrão de reversão.
-Se as métricas entrarem em conflito (ex: MACD caindo mas preço subindo sem padrão), aborte a operação.
+REGRAS OBRIGATÓRIAS DE REJEIÇÃO:
+1. Só autorize COMPRA se o RSI estiver próximo a 30 (Sobrevenda) E a tendência for de ALTA.
+2. Só autorize VENDA se o RSI estiver próximo a 70 (Sobrecompra) E a tendência for de BAIXA.
+3. Se a direção do sinal for a mesma da proibida, SEJA IMPLACÁVEL NA EXIGÊNCIA DO SINAL.
+4. Na menor divergência entre os dados ou falta de clareza, retorne NEUTRO.
+Retorne JSON EXATO: {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%", "motivo": "Até 15 palavras."}`;
 
-Responda SOMENTE em JSON: {"sinal": "COMPRA" | "VENDA" | "NEUTRO", "confianca_padrao": "XX%", "motivo": "Máximo 15 palavras do motivo técnico."}`;
-
-          const responseGroq = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-            method: 'POST', headers: { 'Authorization': `Bearer ${GROQ_BOT_KEY}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              model: 'llama-3.1-8b-instant',
-              messages: [{ role: 'user', content: prompt }],
-              response_format: { type: 'json_object' }, 
-              temperature: 0.1
-            })
-          });
+          let iaResposta = null;
+          let tentativas = 0;
           
-          if (responseGroq.ok) {
-            const iaResposta = JSON.parse((await responseGroq.json()).choices[0].message.content.trim());
-            console.log(`↳ 🤖 Veredito: [${iaResposta.sinal}] ${iaResposta.motivo}`);
-            
-            if (iaResposta.sinal !== 'NEUTRO' && parseInt(iaResposta.confianca_padrao) >= 70) {
-              torneioDeSinais.push({
-                ativo, ia: iaResposta, precoAtual, 
-                analise: { rsi, posicaoBollinger, macdDirection: macd.cruzamento, padrao },
-                confianca: parseInt(iaResposta.confianca_padrao),
-                stats: { globalWins, globalLosses, statusBot, taxaAcertoDiaria }
+          while (tentativas < 2 && !iaResposta) {
+            try {
+              const responseGroq = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+                method: 'POST', headers: { 'Authorization': `Bearer ${GROQ_BOT_KEY}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  model: 'llama-3.1-8b-instant',
+                  messages: [{ role: 'user', content: prompt }],
+                  response_format: { type: 'json_object' }, 
+                  temperature: 0.1
+                })
               });
+              if (!responseGroq.ok) throw new Error(`Status ${responseGroq.status}`);
+              iaResposta = JSON.parse((await responseGroq.json()).choices[0].message.content.trim());
+            } catch (err: any) {
+              tentativas++;
+              if (tentativas < 2) await delay(800); 
             }
+          }
+
+          if (!iaResposta) return; 
+          const confiancaNumerica = parseInt(iaResposta.confianca_padrao);
+
+          if ((iaResposta.sinal === 'COMPRA' || iaResposta.sinal === 'VENDA') && confiancaNumerica >= 70) {
+            torneioDeSinais.push({ 
+              ativo, ia: iaResposta, precoAtual, rsi: rsi5m, padrao: padraoMicro, confianca: confiancaNumerica, 
+              stats: { totalOps: totalResolvido, taxaAcerto: taxaAcertoAtual, wins, losses, globalWins, globalLosses, statusBot, taxaAcertoDiaria } 
+            });
           }
         } catch (e: any) { return; }
       }));
+
+      const tempoBloco = ((Date.now() - inicioBloco) / 1000).toFixed(2);
+      console.log(`✅ [BLOCO ${indexBloco + 1}/${totalBlocos}] Concluído em ${tempoBloco}s | Candidatos acumulados: ${torneioDeSinais.length}`);
     }
 
+    const tempoGasto = ((Date.now() - inicioExecucao) / 1000).toFixed(2);
+    console.log(`🏁 [FIM DA VARREDURA] Tempo total: ${tempoGasto}s`);
+    
     if (torneioDeSinais.length > 0) {
       torneioDeSinais.sort((a, b) => b.confianca - a.confianca);
-      const alvo = torneioDeSinais[0]; // Pega apenas o mais confiante
-      console.log(`🚀 SINAL HÍBRIDO ENCONTRADO! Enviando: ${alvo.ia.sinal} para ${alvo.ativo}`);
-      await enviarSinalTelegram(alvo.ativo, alvo.ia, alvo.precoAtual, alvo.analise, alvo.stats);
+      const alvo = torneioDeSinais[0];
+      await enviarSinalTelegram(alvo.ativo, alvo.ia, alvo.precoAtual, alvo.rsi, alvo.padrao, alvo.stats);
     } else {
-      console.log(`🛑 Nenhum cenário perfeito encontrado neste ciclo.`);
+      console.log(`🛑 Nenhum sinal atendeu aos critérios de rigor da IA.`);
     }
 
-    return NextResponse.json({ success: true, mensagem: `Ciclo concluído sem sobrecarga.` });
+    return NextResponse.json({ success: true, tempoTotal: `${tempoGasto}s`, sinaisEncontrados: torneioDeSinais.length });
   } catch (error: any) {
+    console.error("❌ Erro Geral de Execução:", error);
     return NextResponse.json({ error: "Erro interno" }, { status: 500 });
   }
 }
